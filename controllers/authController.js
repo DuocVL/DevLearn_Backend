@@ -1,7 +1,6 @@
 const bcrypt = require('bcrypt');
 const User = require('../models/User');
 
-
 const handleNewUser = async (req, res) => {
     const { username, email, password } = req.body;
     if(!username || !email || !password) {
@@ -21,9 +20,8 @@ const handleNewUser = async (req, res) => {
     bcrypt.hash(password, 10, async (err, hash) => {
         if(err) { return next(err); }
         const newUser = await User.create({ provider: 'local', email: email, username: username, passwordHash: hash});
+        return res.status(201).json({'message': 'Create user !', newUser });
     });
-
-    //Tạo token
 
 };
 
