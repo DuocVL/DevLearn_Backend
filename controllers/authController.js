@@ -1,7 +1,9 @@
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const RefreshTokens = require('../models/RefreshTokens');
 
-const handleNewUser = async (req, res) => {
+const handlerNewUser = async (req, res) => {
     const { username, email, password } = req.body;
     if(!username || !email || !password) {
         res.status(400).json(
@@ -25,5 +27,25 @@ const handleNewUser = async (req, res) => {
 
 };
 
-module.exports = { handleNewUser };
+const handlerLogout = (req, res) => {
+    
+    const authHeader = req.headers['authorization'];
+    if(!authHeader) return res.status(401).json({ message: "No authorization header" });
+    const assetToken = authHeader.split(' ')[1];
+    if(!assetToken) return res.status(401).json({ message: "No token provided" });
+    
+    jwt.verify(
+        assetToken,
+        process.env.JWT_ACCESS_TOKEN_SECRET,
+        async (err, decoded) => {
+            if(err) return res.status(403);
+            const { deletedCount } = await RefreshTokens.deleteOne({email: decoded.email, id: decoded.id});
+            if(deletedCount === 0) return res.status(403).json({ message: "Token not found or already deleted" });
+            return res.status(200).json({ message: "Logout successful" });
+        }
+    );
+
+};
+
+module.exports = { handlerNewUser, handlerLogout };
 

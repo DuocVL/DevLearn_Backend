@@ -14,4 +14,4 @@ const lessonSchema = new mongoose.Schema({
 
 );
 
-module.exports = mongoose.Model('Lessons', lessonSchema);
+module.exports = mongoose.model('Lessons', lessonSchema);

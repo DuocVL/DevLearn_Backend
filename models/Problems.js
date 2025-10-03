@@ -12,4 +12,4 @@ const problemSchema = new mongoose.Schema({
     authorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Users' },
 }, { timestamps: true });
 
-module.exports = mongoose.Model('Problems', problemSchema);
+module.exports = mongoose.model('Problems', problemSchema);

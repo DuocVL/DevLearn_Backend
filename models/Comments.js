@@ -2,10 +2,10 @@ const mongoose = require('mongoose');
 
 const commentSchema = new mongoose.Schema({
 
-    lessonId: { type: mongoose.Schema.Types.ObjectId, ref: 'Lessons'},
-    postId: { type: mongoose.Schema.Types.ObjectId, ref: 'Posts'},
+    parentType: { type: String , required: true},
+    parentId: { type: mongoose.Schema.Types.ObjectId, required: true},
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'Users'},
-    content: String,
+    content: { type: String, required: true },
     likes: { type: Number, default: 0 },
     commentsReply: Number,
     replies: [{
@@ -19,4 +19,4 @@ const commentSchema = new mongoose.Schema({
     }
 );
 
-module.exports = mongoose.Model('Comments', commentSchema);
+module.exports = mongoose.model('Comments', commentSchema);

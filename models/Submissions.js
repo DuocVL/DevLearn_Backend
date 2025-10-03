@@ -12,4 +12,4 @@ const submissionsSchema = new mongoose.Schema({
     { timestamps: true }
 );
 
-module.exports = mongoose.Model('Submissions', submissionsSchema);
+module.exports = mongoose.model('Submissions', submissionsSchema);

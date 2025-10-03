@@ -9,8 +9,11 @@ const userSchema = new mongoose.Schema({
     passwordHash: String, //Chỉ dùng cho local
     avatar: String,
     roles: { type: String, default: 'Student'},//quyền
-    savedTutorials: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Tutorials'}],//Danh sách các khóa học
-    savedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problems' }],//Danh sách các vấn đề đã lưu
+    comments: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Comments' }],
+    savedTutorials: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Tutorials'}],//Danh sách các khóa học,
+    savedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problems' }],//Danh sách các vấn đề đã lưu,
+    savedPosts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Posts' }], //Danh sách các bài viết đã lưu,
+
     },{
         timestamps: true
     }

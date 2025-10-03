@@ -7,4 +7,4 @@ const proglangSchema = new mongoose.Schema({
     logoUrl: String,
 });
 
-module.exports = mongoose.Model('ProgLangs', proglangSchema);
+module.exports = mongoose.model('ProgLangs', proglangSchema);

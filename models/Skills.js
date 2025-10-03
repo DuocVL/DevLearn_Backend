@@ -7,4 +7,4 @@ const skillSchema = new mongoose.Schema({
     relatedProblems: Array,
 });
 
-module.exports = mongoose.Model('Skills', skillSchema);
+module.exports = mongoose.model('Skills', skillSchema);
