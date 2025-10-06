@@ -22,7 +22,7 @@ const handlerUpdatePost = async (req, res) => {
         const { postId, title, content, tags } = req.body;
         if( !postId || !title || !content) return res.status(400).json({ message: "PostId, Title & Content required "});
         const postUpdated = await Posts.findByIdAndUpdate(
-            postId.$oid,
+            postId,
             {
                 title: title,
                 content: content,
@@ -67,8 +67,4 @@ const handleGetListPost = async (req, res) => {
 
 };
 
-const handleAddLike = async (req, res) => {
-
-};
-
-module.exports = { handlerAddPost , handlerUpdatePost, handlerDeletePost, handlerGetPost, handleGetListPost, handleAddLike };
+module.exports = { handlerAddPost , handlerUpdatePost, handlerDeletePost, handlerGetPost, handleGetListPost };

@@ -1,74 +1,139 @@
+const mongoose = require('mongoose');
 const Comments = require('../models/Comments');
+const Posts = require('../models/Posts');
+const Problems = require('../models/Problems');
+const Lessons = require('../models/Lessons');
 
+const map = {
+    posts: Posts,
+    problems: Problems,
+    lessons: Lessons,
+}
+async function updateCollection(targetId, targetType, number) {
+    const model = map[targetType];
+    if(!model) throw new Error("Invalid targetType");
+    await model.updateOne({_id: targetId}, { $inc: { commentCount: number }});
+}
+
+//Thêm bình luận mới
 const handlerAddComment = async (req, res) => {
     try {
-        const { parentType, parentId, content } = req.query;
-        if(!parentType || !parentId || !content) return res.status(400).json({ message: "ParentType & ParentId are required" });
-        if(!content) return res.status(400).json({ message: "Comment is empty" });
-        const comments = await Comments.create(
+        const { targetType, targetId, parentCommentId, content, anonymous } = req.body;
+        if(!targetId || !targetType || !content ) return res.status(400).json({ message: "Missing required fields" });
+
+        if(!mongoose.Types.ObjectId.isValid(targetId)) return res.status(400).json({ message: "Invalid targetId" });
+
+        if(parentCommentId && !mongoose.Types.ObjectId.isValid(parentCommentId)) return res.status(400).json({ message: "Invalid parentCommentId" });
+        const commentNew = await Comments.create(
             {
-                parentType: parentType,
-                parentId: parentId,
-                userId: req.userId,
+                targetId: targetId,
+                targetType: targetType,
+                parentCommentId: parentCommentId ,
+                userId: req.user._id,
                 content: content,
+                anonymous: anonymous,
             }
         );
-        //!Ghi vào User, parent
 
-        return res.status(201).json({ message: "Comment created" , comments});
+        await updateCollection(targetId, targetType, 1);
+        if(parentCommentId){
+            await Comments.updateOne({ _id: parentCommentId }, { $inc: {replyCount: 1}});
+        }
+
+        return res.status(201).json({ message: "Comment created successfully", data: commentNew});
+
     } catch (err) {
-        return res.status(500).json({ message: "Error creating comment" });
+        console.error(err);
+        return res.status(500).json({ message: "Internal server error" });
     }
 };
 
+//Chỉnh sủa bình luận
 const handlerUpdateComment = async (req, res) => {
     try {
-        const commentId = req.params.commentId;
-        if(!commentId) return res.status(400).json({ message: "CommentId is required" });
-        const comment = Comments.findById(commentId);
-        if(!comment) return res.status(404).json({ message: "Tài nguyên không tồn tại" });
+        const { commentId } = req.params.commentId;
+        const { content } = req.body;
+        if(!commentId || !content) return res.status(400).json({ message: "Missing required fields" });
+
+        if(!mongoose.Types.ObjectId.isValid(commentId)) return res.status(400).json({ message: "Invalid commentId" });
+
+        const comment = await Comments.findById(commentId);
+        if(!comment) return res.status(404).json({ message: "Comment not found" });
+
+        if(!comment.userId.equals(req.user._id)) return res.status(403).json({ message: "Forbidden: Not your comment" });
+
+        if(comment.isDeleted) return res.status(400).json({ message: "Comment deleted"});
+
+        const commentNew = await Comments.findByIdAndUpdate(
+            commentId,
+            { content: content },
+            {new: true},
+        );
+
+        return res.status(200).json({message: "Comment updated successfully", data: commentNew});
     } catch (err) {
-        
+        console.error(err);
+        return res.status(500).json({ message: "Internal server error" });
     }
 };
 
-//! Lỗi xác minh
+// Xóa bình luận
 const handlerDeleteComment = async (req, res) => {
     try {
         const commentId = req.params.commentId;
-        if(!commentId) return res.status(400).json({ message: "CommentId is required" });
+        if(!commentId) return res.status(400).json({ message: "Missing required fields" });
+
+        if(!mongoose.Types.ObjectId.isValid(commentId)) return res.status(400).json({ message: "Invalid commentId" });
+
         const comment = await Comments.findById(commentId);
-        if(!comment) return res.status(404).json({ message: "Tài nguyên không tồn tại" });
-        if(comment.userId.equals(req.userId, {toString})) return res.status(403).json({ message: "Không có quyền xóa tài nguyên" });//!!! xem lại
-        await comment.deleteOne();
-        return res.status(201).json({ message: "Comment deleted" });
+        if(!comment) return res.status(404).json({ message: "Comment not found" });
+
+        if(!comment.userId.equals(req.user._id)) return res.status(403).json({ message: "Forbidden: Not your comment" });
+
+        await updateCollection(comment.targetId, comment.targetType, -1);
+        
+        await Comments.findByIdAndUpdate(
+            commentId,
+            {
+                content: "comment đã xóa",
+                isDeleted: true,
+            }
+        );
+
+        return res.status(200).json({ message: "Comment deleted" });
     } catch (err) {
         console.error(err);
-        return res.status(500).json({ message: "Error deleting comment" });
+        return res.status(500).json({ message: "Internal server error" });
     }
 };
 
-//Xử lí like,unlike
-const handlerLikeComment = async (req, res) => {
+
+//Lấy danh sách comment
+const handlerGetListComment = async (req, res) => {
+
+};
+
+//Lây danh sách phản hồi 1 comment
+const handlerGetReply = async (req, res) => {
+    try {
+        const { parentCommentId } = req.params;
+        if(!parentCommentId) return res.status(400).json({ message: "Missing required fields" });
     
-};
-
-//Xử lí Reply
-const handlerAddReply = async (req, res) => {
-
-};
-
-const handlerUpdateReply = async (req, res) => {
-
-};
-
-const handlerDeleteReply = async (req, res) => {
-
-};
-
-const handlerLikeReply = async (req, res) => {
+        if(!mongoose.Types.ObjectId.isValid(parentCommentId)) return res.status(400).json({ message: "Invalid parentCommentId" });
+    
+        const { page = 1,limit = 20  } = req.query;
+    
+        const replies = await Comments.find({ parentCommentId: parentCommentId}, null, { limit: limit});
+        return res.status(200).json({ data: replies });
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Internal server error" });
+    }
 
 };
 
 
-module.exports = { handlerAddComment, handlerUpdateComment, handlerDeleteComment, handlerLikeComment, handlerAddReply, handlerUpdateReply, handlerDeleteReply, handlerLikeReply };
+
+
+
+module.exports = { handlerAddComment, handlerUpdateComment, handlerDeleteComment, handlerGetListComment, handlerGetReply };

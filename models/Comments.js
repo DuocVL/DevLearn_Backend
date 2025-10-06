@@ -2,21 +2,18 @@ const mongoose = require('mongoose');
 
 const commentSchema = new mongoose.Schema({
 
-    parentType: { type: String , required: true},
-    parentId: { type: mongoose.Schema.Types.ObjectId, required: true},
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'Users'},
-    content: { type: String, required: true },
-    likes: { type: Number, default: 0 },
-    commentsReply: Number,
-    replies: [{
-        userIdReply: { type: mongoose.Schema.Types.ObjectId, ref: 'Users'},//Id người reply
-        userIdSource: { type: mongoose.Schema.Types.ObjectId, ref: 'Users'},//Id người được reply
-        content: String,
-        createdAt: { type: Date, default: Date.now }
-    }]
-    },{
-        timestamps: true,
-    }
+    targetType: { type: String, required: true, enum: ["posts", "problems", "lessons"]},
+    targetId: { type: mongoose.Schema.Types.ObjectId, required: true},
+    parentCommentId: { type: mongoose.Schema.Types.ObjectId, ref: "Comments", default: null},
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'Users', required: true },
+    content: { type: String, required: true, trim: true, maxlength: 200 },
+    likeCount: { type: Number, default: 0 },
+    unlikeCount: { type: Number, default: 0 },
+    replyCount: { type: Number, default: 0 },
+    isDeleted: {type: Boolean, default: false},
+    anonymous: { type: Boolean, default: false },//Ẩn danh người đăng   
+    hidden: { type: Boolean, default: false },
+    },{ timestamps: true, }
 );
 
 module.exports = mongoose.model('Comments', commentSchema);

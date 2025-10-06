@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
+const User = require('../models/User');
 
-const verifyJWT = (req, res, next) => {
+const verifyJWT =  (req, res, next) => {
     const authHeader = req.headers['authorization'];
     if(!authHeader) return res.status(401).json({ message: "Missing or incorrect token"});
 
@@ -10,9 +11,10 @@ const verifyJWT = (req, res, next) => {
     jwt.verify(
         assetToken,
         process.env.JWT_ACCESS_TOKEN_SECRET,
-        (err, decoded) => {
+        async (err, decoded) => {
             if(err) return res.status(403).json({ message: "Authentication error"});
-            req.userId = decoded.id;
+            const user = await User.findById(decoded.userId);
+            req.user = user;
             next();
         }
     );
