@@ -4,7 +4,8 @@ const { handlerAddComment, handlerUpdateComment, handlerDeleteComment, handlerGe
 router.post('/', handlerAddComment);
 router.patch('/:commentId', handlerUpdateComment);
 router.delete('/:commentId', handlerDeleteComment);
-router.get('/', handlerGetListComment);
 router.get('/replies/:parentCommentId',handlerGetReply);
+router.get('/:targetType/:targetId', handlerGetListComment);
+
 
 module.exports = router;

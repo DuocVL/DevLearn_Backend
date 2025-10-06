@@ -51,7 +51,7 @@ const handlerAddComment = async (req, res) => {
 //Chỉnh sủa bình luận
 const handlerUpdateComment = async (req, res) => {
     try {
-        const { commentId } = req.params.commentId;
+        const { commentId } = req.params;
         const { content } = req.body;
         if(!commentId || !content) return res.status(400).json({ message: "Missing required fields" });
 
@@ -110,7 +110,51 @@ const handlerDeleteComment = async (req, res) => {
 
 //Lấy danh sách comment
 const handlerGetListComment = async (req, res) => {
+    try {
+        const { targetId, targetType } = req.params;
+        if(!targetId || !targetType) return res.status(400).json({ message: "Missing required fields" });
+    
+        if(!mongoose.Types.ObjectId.isValid(targetId)) return res.status(400).json({ message: "Invalid parentCommentId" });
+    
+        const { page = 1,limit = 20  } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const total = await Comments.countDocuments({
+            targetId,
+            targetType,
+            isDeleted: false,
+            hidden: false
+        });
 
+        const listcomment = await Comments.find(
+            { 
+                targetId: targetId,
+                targetType: targetType,
+                isDeleted: false,
+                hidden: false,
+
+            }
+        )
+        .populate({
+            path: "userId",
+            select: "username avatar",
+        })
+        .sort({ createdAt: -1})
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean();
+
+        return res.status(200).json({
+            data: listcomment ,
+            pagination: {
+                currentPage: parseInt(page),
+                totalPages: Math.ceil(total / limit),
+                totalComments: total
+            }
+        });
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Internal server error" });
+    }
 };
 
 //Lây danh sách phản hồi 1 comment
@@ -122,8 +166,26 @@ const handlerGetReply = async (req, res) => {
         if(!mongoose.Types.ObjectId.isValid(parentCommentId)) return res.status(400).json({ message: "Invalid parentCommentId" });
     
         const { page = 1,limit = 20  } = req.query;
-    
-        const replies = await Comments.find({ parentCommentId: parentCommentId}, null, { limit: limit});
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const replies = await Comments.find(
+            { 
+                parentCommentId: parentCommentId ,
+                isDeleted: false,
+                hidden: false,
+
+            }
+        )
+        .populate({
+            path: "userId",
+            select: "username avatar",
+            
+        })
+        .sort({ createdAt: -1})
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean();
+
         return res.status(200).json({ data: replies });
     } catch (err) {
         console.error(err);
@@ -131,9 +193,6 @@ const handlerGetReply = async (req, res) => {
     }
 
 };
-
-
-
 
 
 module.exports = { handlerAddComment, handlerUpdateComment, handlerDeleteComment, handlerGetListComment, handlerGetReply };
