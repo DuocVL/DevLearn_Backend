@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
-const { handlerNewUser, handlerLogout } = require('../controllers/authController');
+const { handlerNewUser, handlerLogout, handlerForgotPassword, handlerResetPassword } = require('../controllers/authController');
 const RefreshTokens = require('../models/RefreshTokens');
 
 function signToken(user){
@@ -22,6 +22,12 @@ function signToken(user){
 
 //Đăng xuất
 router.get('/logout', handlerLogout );
+
+//Quên mật khẩu
+router.post('/forgot-password', handlerForgotPassword);
+
+//Đặt lại mật khẩu
+router.post('/reset-password', handlerResetPassword);
 
 //Local đăng kí
 router.post('/register', handlerNewUser);

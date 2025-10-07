@@ -9,10 +9,16 @@ const userSchema = new mongoose.Schema({
     passwordHash: String, //Chỉ dùng cho local
     avatar: String,
     roles: { type: String, default: 'Student'},//quyền
-    comments: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Comments' }],
     savedTutorials: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Tutorials'}],//Danh sách các khóa học,
     savedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problems' }],//Danh sách các vấn đề đã lưu,
     savedPosts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Posts' }], //Danh sách các bài viết đã lưu,
+
+    //Dùng cho reset password
+    resetPasswordCode: String,
+    resetPasswordExpires: Date,
+    //Dùng cho xác minh email
+    verifyToken: String,
+    verified: { type: Boolean, default: false },
 
     },{
         timestamps: true
