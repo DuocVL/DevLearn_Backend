@@ -19,6 +19,8 @@
   "dependencies": {
     "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.2",
+    "bull": "^4.16.5",
+    "bullmq": "^5.61.0",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
     "handlebars": "^4.7.8",
@@ -28,7 +30,8 @@
     "passport": "^0.7.0",
     "passport-github2": "^0.1.12",
     "passport-google-oauth20": "^2.0.0",
-    "passport-local": "^1.0.0"
+    "passport-local": "^1.0.0",
+    "pidusage": "^4.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

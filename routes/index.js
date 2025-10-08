@@ -6,6 +6,7 @@ router.use('/comments', require('./comments'));
 router.use('/reactions', require('./reactions'));
 // router.use('/tutorials', require('./tutorials'));
 router.use('/problems', require('./problems'));
+router.use('/submissions', require('./submissions'));
 
 
 module.exports = router;

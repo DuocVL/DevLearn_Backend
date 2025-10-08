@@ -4,19 +4,20 @@ const submissionsSchema = new mongoose.Schema({
 
     problemId: {type: mongoose.Schema.Types.ObjectId, ref: 'Problems', required: true},
     userId: {type: mongoose.Schema.Types.ObjectId, ref: 'Users', required: true},
-    language: { type: String, required: true }, // vd: cpp, python, java
+    language: { type: String, required: true , enum:['cpp', 'python', 'javascript', 'java'] }, // vd: cpp, python, java
     code: { type: String, required: true },
 
     // Trạng thái chấm bài
     status: {
         type: String,
         enum: [
-        'Accepted',
-        'Wrong Answer',
-        'Time Limit Exceeded',
-        'Runtime Error',
-        'Memory Limit Exceeded',
-        'Compilation Error'
+            'Accepted',
+            'Running',
+            'Wrong Answer',
+            'Time Limit Exceeded',
+            'Runtime Error',
+            'Memory Limit Exceeded',
+            'Compilation Error'
         ],
         default: 'Pending'
     },
