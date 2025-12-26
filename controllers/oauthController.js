@@ -1,18 +1,10 @@
 const { OAuth2Client } = require('google-auth-library');
 const axios = require('axios');
 const Users = require('../models/User');
-const RefreshTokens = require('../models/RefreshTokens');
-const { upsertRefreshToken } = require('./refreshHelper');
-const jwt = require('jsonwebtoken');
-
-const signTokenPair = (userId, email) => {
-    const accessToken = jwt.sign({ userId, email }, process.env.JWT_ACCESS_TOKEN_SECRET, { expiresIn: '15m' });
-    const refreshToken = jwt.sign({ userId, email }, process.env.JWT_REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
-    return { accessToken, refreshToken };
-};
+const { handleLogin } = require('./authController'); // Import the centralized login handler
 
 // Google: accept { idToken } from mobile client
-const handleGoogleOAuth = async (req, res) => {
+const handleGoogleOAuth = async (req, res, next) => {
     try {
         const { idToken } = req.body || {};
         if (!idToken) return res.status(400).json({ message: 'idToken required' });
@@ -24,28 +16,35 @@ const handleGoogleOAuth = async (req, res) => {
 
         const email = payload.email;
         let user = await Users.findOne({ email });
+
         if (!user) {
-            // create user
             const username = payload.name ? payload.name.replace(/\s+/g, '').toLowerCase() : `g_${payload.sub}`;
-            user = await Users.create({ provider: 'google', email, username });
+            user = await Users.create({ 
+                provider: 'google', 
+                email, 
+                username, 
+                // For OAuth users, we can consider their email verified
+                isEmailVerified: true 
+            });
         }
 
-        const { accessToken, refreshToken } = signTokenPair(user._id, email);
-        await upsertRefreshToken(user._id, email, refreshToken);
-        return res.json({ accessToken, refreshToken, user });
+        // Attach user to request and pass to the login handler
+        req.user = user;
+        return handleLogin(req, res);
+
     } catch (err) {
         console.error('Google OAuth error', err);
-        return res.status(500).json({ message: 'Server error' });
+        return res.status(500).json({ message: 'Server error during Google OAuth' });
     }
 };
 
 // GitHub: accept { code } from client, exchange for access token
-const handleGithubOAuth = async (req, res) => {
+const handleGithubOAuth = async (req, res, next) => {
     try {
         const { code } = req.body || {};
         if (!code) return res.status(400).json({ message: 'code required' });
 
-        // exchange code
+        // 1. Exchange code for access token
         const tokenRes = await axios.post('https://github.com/login/oauth/access_token', {
             client_id: process.env.GITHUB_CLIENT_ID,
             client_secret: process.env.GITHUB_CLIENT_SECRET,
@@ -53,32 +52,46 @@ const handleGithubOAuth = async (req, res) => {
         }, { headers: { Accept: 'application/json' } });
 
         const tokenData = tokenRes.data;
-        if (!tokenData || tokenData.error) return res.status(400).json({ message: 'GitHub token exchange failed', details: tokenData });
-        const access = tokenData.access_token;
+        if (!tokenData || tokenData.error || !tokenData.access_token) {
+            return res.status(400).json({ message: 'GitHub token exchange failed', details: tokenData });
+        }
+        const githubAccessToken = tokenData.access_token;
 
-        // fetch user emails to get primary email
-        const emailsRes = await axios.get('https://api.github.com/user/emails', { headers: { Authorization: `token ${access}`, Accept: 'application/vnd.github+json' } });
+        // 2. Fetch user's primary email
+        const emailsRes = await axios.get('https://api.github.com/user/emails', { 
+            headers: { Authorization: `token ${githubAccessToken}`, Accept: 'application/vnd.github+json' } 
+        });
         const emails = emailsRes.data || [];
-        const primaryEmailObj = emails.find(e => e.primary) || emails[0];
-        const email = primaryEmailObj?.email;
+        const primaryEmailObj = emails.find(e => e.primary && e.verified) || emails.find(e => e.verified);
 
-        if (!email) return res.status(400).json({ message: 'Email not available from GitHub' });
+        if (!primaryEmailObj || !primaryEmailObj.email) {
+            return res.status(400).json({ message: 'Could not find a verified primary email from GitHub.' });
+        }
+        const email = primaryEmailObj.email;
 
+        // 3. Find or create user in our database
         let user = await Users.findOne({ email });
         if (!user) {
-            // fetch basic profile
-            const profileRes = await axios.get('https://api.github.com/user', { headers: { Authorization: `token ${access}` } });
+            const profileRes = await axios.get('https://api.github.com/user', { 
+                headers: { Authorization: `token ${githubAccessToken}` } 
+            });
             const profile = profileRes.data || {};
             const username = profile.login || `gh_${profile.id}`;
-            user = await Users.create({ provider: 'github', email, username });
+            user = await Users.create({ 
+                provider: 'github', 
+                email, 
+                username, 
+                isEmailVerified: true 
+            });
         }
 
-        const { accessToken, refreshToken } = signTokenPair(user._id, email);
-        await upsertRefreshToken(user._id, email, refreshToken);
-        return res.json({ accessToken, refreshToken, user });
+        // 4. Attach user to request and pass to the centralized login handler
+        req.user = user;
+        return handleLogin(req, res);
+
     } catch (err) {
         console.error('GitHub OAuth error', err.response?.data || err.message || err);
-        return res.status(500).json({ message: 'Server error' });
+        return res.status(500).json({ message: 'Server error during GitHub OAuth' });
     }
 };
 

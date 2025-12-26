@@ -1,12 +1,14 @@
 require('dotenv').config();
+const http = require('http'); // Import http module
 const express = require('express');
 const passport = require('./config/passport');
 const connectdb = require('./config/db');
-const verifyJWT = require('./middleware/verifyJWT')
+const verifyJWT = require('./middleware/verifyJWT');
 const authRoutes = require('./routes/auth');
 const refreshRoutes = require('./routes/refresh');
 const indexRoutes = require('./routes/index');
-
+const { startWorker } = require('./services/judgeWorker');
+const socketService = require('./services/socketService'); // Import socket service
 
 const PORT = process.env.PORT || 3500;
 
@@ -22,10 +24,15 @@ app.use('/refresh', refreshRoutes);
 app.use(verifyJWT);
 app.use('/', indexRoutes);
 
-const { startWorker } = require('./services/judgeWorker');
+// Create HTTP server from the Express app
+const server = http.createServer(app);
 
-app.listen(PORT, () => {
+// Initialize the WebSocket server and attach it to the HTTP server
+socketService.init(server);
+
+// Start listening on the new server object
+server.listen(PORT, () => {
     console.log(`Server running on port ${PORT} ✅`);
-    // start judge worker in same process (for development). In production run separate worker process.
+    // Start the judge worker
     startWorker().catch(err => console.error('Failed to start judge worker', err));
 });
