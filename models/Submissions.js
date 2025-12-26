@@ -11,6 +11,7 @@ const submissionsSchema = new mongoose.Schema({
     status: {
         type: String,
         enum: [
+            'Pending',
             'Accepted',
             'Running',
             'Wrong Answer',

@@ -6,13 +6,15 @@ const User = require('../models/User');
 const bcrypt = require('bcryptjs');
 
 //Local Strategy
-passport.use(new LocalStrategy(
-    async (username, password, done) => {
+passport.use(new LocalStrategy({ usernameField: 'email' },
+    async (identifier, password, done) => {
         try {
-            const user = await User.findOne({ username });
+            // Try to find by email first, then by username to allow login with either
+            let user = await User.findOne({ email: identifier });
+            if (!user) user = await User.findOne({ username: identifier });
             if(!user) return done(null, false, { message: 'Incorrect username or password!'});
 
-            const isMatch = bcrypt.compare(password, user.passwordHash);
+            const isMatch = await bcrypt.compare(password, user.passwordHash);
             if(!isMatch) return done(null, false, { message: 'Incorrect username or password!'});
             
             return done(null, user);

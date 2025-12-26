@@ -29,10 +29,10 @@ const problemSchema = new mongoose.Schema({
     hidden: { type: Boolean, default: false},
     
     authorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Users' },
-    stats: {
-        totalSubmissions: { type: Number, default: 0},
-        acceptedSubmissions: { type: Number, default: 0},
-    }
+    
+    totalSubmissions: { type: Number, default: 0},
+    acceptedSubmissions: { type: Number, default: 0},
+    
 }, { timestamps: true });
 
 module.exports = mongoose.model('Problems', problemSchema);

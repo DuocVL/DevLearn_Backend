@@ -4,6 +4,7 @@ const passport = require('passport');
 const jwt = require('jsonwebtoken');
 const { handlerNewUser, handlerLogout, handlerForgotPassword, handlerResetPassword } = require('../controllers/authController');
 const RefreshTokens = require('../models/RefreshTokens');
+const { upsertRefreshToken } = require('../controllers/refreshHelper');
 
 function signToken(user){
     const userId = user._id
@@ -21,13 +22,22 @@ function signToken(user){
 }
 
 //Đăng xuất
+// accept both GET (legacy) and POST (client uses POST)
 router.get('/logout', handlerLogout );
+router.post('/logout', handlerLogout );
 
 //Quên mật khẩu
 router.post('/forgot-password', handlerForgotPassword);
+// alias routes to match mobile/frontend expectations
+router.post('/forgot/send-code', handlerForgotPassword);
 
 //Đặt lại mật khẩu
 router.post('/reset-password', handlerResetPassword);
+router.post('/forgot/reset', handlerResetPassword);
+
+// Token refresh route handled by controller
+const { handleRefreshToken } = require('../controllers/refreshTokenController');
+router.post('/refresh', handleRefreshToken);
 
 //Local đăng kí
 router.post('/register', handlerNewUser);
@@ -35,7 +45,7 @@ router.post('/register', handlerNewUser);
 //Local đăng nhập
 router.post('/login', passport.authenticate('local',{session: false}), async (req, res) => {
     const { accessToken , refreshToken } = signToken(req.user);
-    await RefreshTokens.create({ userId: req.user._id , email: req.user.email , refreshToken });
+    await upsertRefreshToken(req.user._id, req.user.email, refreshToken);
     res.json({ message: "Login successful!", user: req.user, accessToken, refreshToken});
 });
 
@@ -44,20 +54,26 @@ router.get('/google', passport.authenticate('google', { scope: [ 'profile', 'ema
 router.get('/google/callback', passport.authenticate('google', { session: false, failureRedirect: '/auth/fail'}), 
     async (req, res) => {
         const { accessToken, refreshToken } = signToken(req.user);
-        await RefreshTokens.create({ userId: req.user._id , email: req.user.email , refreshToken });
+        await upsertRefreshToken(req.user._id, req.user.email, refreshToken);
         res.redirect(`${process.env.CLIENT_URL}/oauth-success?accessToken=${accessToken}&refreshToken=${refreshToken}`);
     }
 );
+
+// API endpoints for mobile OAuth flows (client should send idToken or code)
+const { handleGoogleOAuth, handleGithubOAuth } = require('../controllers/oauthController');
+router.post('/oauth/google', handleGoogleOAuth);
 
 //Github
 router.get('/github', passport.authenticate('github', { scope: [ 'user:email'] }));
 router.get('/github/callback', passport.authenticate('github', { session: false, failureRedirect: '/auth/fail'}), 
     async (req, res) => {
         const { accessToken, refreshToken } = signToken(req.user);
-        await RefreshTokens.create({ userId: req.user._id , email: req.user.email , refreshToken });
+        await upsertRefreshToken(req.user._id, req.user.email, refreshToken);
         res.redirect(`/oauth-success?accessToken=${accessToken}&refreshToken=${refreshToken}`);
     }
 );
+
+router.post('/oauth/github', handleGithubOAuth);
 
 
 

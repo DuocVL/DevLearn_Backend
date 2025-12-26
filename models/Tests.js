@@ -7,10 +7,8 @@ const testSchema = new mongoose.Schema({
     options: [
         { text: String, isCorrect: Boolean}
     ],
-    explanation: String,},{
-        timestamps: true,
-    }
-
+    explanation: String,
+    },{ timestamps: true, }
 );
 
 module.exports = mongoose.model('Tests', testSchema);

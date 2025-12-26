@@ -2,13 +2,14 @@ const Posts = require('../models/Posts');
 
 const handlerAddPost = async (req, res) => {
     try {
-        const { title, content, tags } = req.body;
-        if( !title || !content) return res.status(400).json({ message: "Title & Content required "});
+        const { title, content, tags, anonymous } = req.body;
+        if( !title || !content || !anonymous) return res.status(400).json({ message: "Title & Content required "});
         const post = await Posts.create({
             title: title,
             content: content,
             authorId: req.userId,
             tags: tags,
+            anonymous: anonymous,
         });
 
         return res.status(201).json({ message: "Post created", post });
@@ -63,9 +64,22 @@ const handlerGetPost = async (req, res) => {
     }
 };
 
-//TODO
 const handleGetListPost = async (req, res) => {
+    try {
+        const { page = 1, limit = 20, tag } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
 
+        const filter = { hidden: false };
+        if (tag) filter.tags = tag;
+
+        const total = await Posts.countDocuments(filter);
+        const posts = await Posts.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit));
+
+        return res.status(200).json({ data: posts, pagination: { currentPage: parseInt(page), totalPages: Math.ceil(total / limit), total } });
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: 'Internal server error' });
+    }
 };
 
 module.exports = { handlerAddPost , handlerUpdatePost, handlerDeletePost, handlerGetPost, handleGetListPost };

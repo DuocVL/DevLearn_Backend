@@ -5,11 +5,11 @@ const verifyJWT =  (req, res, next) => {
     const authHeader = req.headers['authorization'];
     if(!authHeader) return res.status(401).json({ message: "Missing or incorrect token"});
 
-    const assetToken = authHeader.split(' ')[1];
-    if(!assetToken) return res.status(401).json({ message: "Missing or incorrect token"});
+    const accessToken = authHeader.split(' ')[1];
+    if(!accessToken) return res.status(401).json({ message: "Missing or incorrect token"});
 
     jwt.verify(
-        assetToken,
+        accessToken,
         process.env.JWT_ACCESS_TOKEN_SECRET,
         async (err, decoded) => {
             if(err) return res.status(403).json({ message: "Authentication error"});

@@ -1,6 +1,8 @@
 const router = require('express').Router();
-const { handlerCreateSubmisson, handlerGetSubmisson, handlerGetListSubmisson } = require('../controllers/submissionController');
+const { createSubmission, getSubmission } = require('../controllers/submissionController');
+const verifyJWT = require('../middleware/verifyJWT');
 
-router.post('/', handlerCreateSubmisson);
-router.get('/', handlerGetListSubmisson);
-router.get('/:submissionId', handlerGetSubmisson);
+router.post('/', verifyJWT, createSubmission);
+router.get('/:id', verifyJWT, getSubmission);
+
+module.exports = router;

@@ -6,3 +6,5 @@ router.patch('/:problemId', handlerUpdateProblems);
 router.delete('/:problemId', handlerDeleteProblems);
 router.get('/', handlerGetListProblems);
 router.get('/search', handlerSearchProblems);
+
+module.exports = router;

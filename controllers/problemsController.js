@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Problems = require('../models/Problems');
 
 const handlerCreateProblems = async (req, res) => {
@@ -88,25 +89,43 @@ const handlerDeleteProblems = async (req, res) => {
 const handlerGetListProblems = async (req, res) => {
     try {
         const { page = 1, limit = 20, difficulty, tag } = req.query;
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const pageNum = parseInt(page) || 1;
+        const limitNum = parseInt(limit) || 20;
+        const skip = (pageNum - 1) * limitNum;
 
         const filter = { hidden: false };
-        if(difficulty) filter.difficulty = difficulty;
-        if(tag) filter.tags = { $inc: [tag] };
+        if (difficulty) filter.difficulty = difficulty;
+        // find problems where tags array contains the tag
+        if (tag) filter.tags = tag;
 
         const total = await Problems.countDocuments(filter);
 
         const problems = await Problems.find(filter)
-            .sort({ createdAt: -1 }) 
+            .sort({ createdAt: -1 })
             .skip(skip)
-            .limit(parseInt(limit));
+            .limit(limitNum);
+
+        // Prepare summary objects for frontend; include solved/saved flags when available
+        const user = req.user || null;
+        const userSaved = (user && Array.isArray(user.savedProblems)) ? user.savedProblems.map(String) : [];
+
+        const summaries = problems.map((p) => {
+            return {
+                id: p._id,
+                title: p.title,
+                difficulty: p.difficulty || 'Unknown',
+                acceptance: (p.acceptance != null) ? p.acceptance : 0,
+                solved: false, // solving state requires separate tracking; default false
+                saved: user ? userSaved.includes(String(p._id)) : false,
+            };
+        });
 
         return res.status(200).json({
-            data: problems,
-             pagination: {
-                currentPage: parseInt(page),
-                totalPages: Math.ceil(total / limit),
-                totalComments: total
+            data: summaries,
+            pagination: {
+                currentPage: pageNum,
+                totalPages: Math.ceil(total / limitNum),
+                totalItems: total
             }
         });
     } catch (err) {

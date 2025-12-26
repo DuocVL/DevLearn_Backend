@@ -124,7 +124,7 @@ const handlerGetListComment = async (req, res) => {
             isDeleted: false,
             hidden: false
         });
-
+ 
         const listcomment = await Comments.find(
             { 
                 targetId: targetId,

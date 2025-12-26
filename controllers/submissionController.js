@@ -1,52 +1,45 @@
-const mongoose = require('mongoose');
 const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
-const judgeQueue = require('../queue/judgeQueue');
 
-const handlerCreateSubmisson = async (req, res) =>{
-    try {
-        const { problemId , language, code } = req.body;
-        if(!problemId || !language || !code ) return res.status(400).json({ message: "Missing required fields" });
+// Create a new submission (enqueue)
+const createSubmission = async (req, res) => {
+  try {
+    const { problemId, language, code } = req.body;
+    if (!problemId || !language || !code) return res.status(400).json({ message: 'Missing required fields' });
 
-        if(!mongoose.Types.ObjectId.isValid(problemId)) return res.status(400).json({ message: "Invalid problemId" });
-        
-        const problem = Problems.findById(problemId);
-        if(!problem) return res.status(404).json({ message: "Problem not found" });
+    // Basic validation: problem exists
+    const problem = await Problems.findById(problemId);
+    if (!problem) return res.status(404).json({ message: 'Problem not found' });
 
-        const submission = await Submissions.create({
-            problemId,
-            language,
-            code,
-        });
+    const submission = await Submissions.create({
+      problemId,
+      userId: req.user._id,
+      language,
+      code,
+      status: 'Pending'
+    });
 
-        await judgeQueue.add({ submissionId: submission._id });
-
-        return res.status(201).json({ message: "Submission created successfully", data: submission });
-    } catch (err) {
-        console.error(err);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(201).json({ message: 'Submission queued', submissionId: submission._id });
+  } catch (err) {
+    console.error('createSubmission error', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 };
 
-const handlerGetSubmisson = async (req, res) => {
-    try {
-        const { submissionId } = req.params;
-        if(!submissionId) return res.status(400).json({ message: "Missing required fields" });
+const getSubmission = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const sub = await Submissions.findById(id).lean();
+    if (!sub) return res.status(404).json({ message: 'Submission not found' });
+    // Ensure user can only access their submissions unless admin
+    if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+    if (String(sub.userId) !== String(req.user._id) && req.user.roles !== 'admin') return res.status(403).json({ message: 'Forbidden' });
 
-        if(!mongoose.Types.ObjectId(submissionId)) return res.status(400).json({ message: "Invalid submissionId" });
-
-        const submission = await Submissions.findById(submissionId);
-        if(!submission) return res.status(404).json({ message: "Submission not found" });
-
-        return res.status(200).json({ data: submission });
-    } catch (err) {
-        console.error(err);
-        return res.status(500).json({ message: "Internal server error" });
-    }
-}
-
-const handlerGetListSubmisson = async (req, res) => {
-
+    return res.json({ submission: sub });
+  } catch (err) {
+    console.error('getSubmission error', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 };
 
-module.exports = { handlerCreateSubmisson, handlerGetSubmisson, handlerGetListSubmisson };
+module.exports = { createSubmission, getSubmission };

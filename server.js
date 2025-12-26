@@ -22,6 +22,10 @@ app.use('/refresh', refreshRoutes);
 app.use(verifyJWT);
 app.use('/', indexRoutes);
 
+const { startWorker } = require('./services/judgeWorker');
+
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT} ✅`);
+    // start judge worker in same process (for development). In production run separate worker process.
+    startWorker().catch(err => console.error('Failed to start judge worker', err));
 });
