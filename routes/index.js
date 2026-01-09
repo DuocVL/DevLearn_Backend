@@ -6,6 +6,7 @@ router.use('/comments', require('./comments'));
 router.use('/reactions', require('./reactions'));
 router.use('/problems', require('./problems'));
 router.use('/submissions', require('./submissions'));
+router.use('/users', require('./users'));
 // router.use('/tutorials', require('./tutorials'));
 
 
