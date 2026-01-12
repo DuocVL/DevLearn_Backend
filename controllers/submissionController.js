@@ -1,17 +1,14 @@
 const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
-const redisClient = require('../config/redis'); // Import the Redis client
+const { redisClient } = require('../config/redis'); // Correctly import the client
 
-const SUBMISSION_QUEUE = 'submissionQueue'; // Name of our Redis queue
+const SUBMISSION_QUEUE = 'submissionQueue';
 
-// Create a new submission (enqueue)
 const createSubmission = async (req, res) => {
   try {
     const { problemId, language, code } = req.body;
     if (!problemId || !language || !code) return res.status(400).json({ message: 'Missing required fields' });
 
-    // OPTIMIZATION: Use countDocuments for a much faster existence check.
-    // This is the key change to prevent timeouts.
     const problemExists = await Problems.countDocuments({ _id: problemId });
     if (problemExists === 0) return res.status(404).json({ message: 'Problem not found' });
 
@@ -20,13 +17,12 @@ const createSubmission = async (req, res) => {
       userId: req.user._id,
       language,
       code,
-      status: 'Pending' // Status is now 'Pending'
+      status: 'Pending'
     });
 
-    // Push the submission ID to the Redis queue
+    // Now this command should execute without causing a timeout
     await redisClient.lPush(SUBMISSION_QUEUE, String(submission._id));
 
-    // This response should now be sent quickly, before any timeout occurs.
     return res.status(201).json({ message: 'Submission queued successfully', submissionId: submission._id });
   } catch (err) {
     console.error('createSubmission error', err);

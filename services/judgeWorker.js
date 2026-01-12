@@ -5,11 +5,13 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
-const redisClient = require('../config/redis');
-const socketService = require('./socketService'); // Import the socket service
+const { redisClient } = require('../config/redis'); // Correctly import the client
+const socketService = require('./socketService');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
 const DEFAULT_TIMEOUT_MS = 3000;
+
+// (The rest of the file remains the same...)
 
 // Helper to update submission and notify clients
 async function updateSubmissionStatus(submissionId, userId, updateData) {
@@ -175,6 +177,7 @@ async function startWorker() {
   console.log('Judge worker starting... Waiting for submissions.');
   while (!_stopping) {
     try {
+      // Use a blocking pop with a timeout to allow for graceful shutdown.
       const result = await redisClient.brPop(SUBMISSION_QUEUE, 0);
       if (result) {
         const submissionId = result.element;
@@ -182,6 +185,10 @@ async function startWorker() {
         await processSubmission(submissionId);
       }
     } catch (err) {
+       if (err.message.includes('Connection is closed')) {
+                console.log('Redis connection closed, stopping worker.');
+                break; // Exit the loop if Redis connection is closed
+            }
       console.error('Worker loop error:', err);
       if (!_stopping) {
         await new Promise((r) => setTimeout(r, 5000));
