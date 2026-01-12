@@ -38,15 +38,16 @@ async function runInDocker(image, hostDir, commandString, timeout) {
     const containerDir = '/usr/src/app';
     const resolvedHostDir = path.resolve(hostDir);
 
-    // Use 'sh -c' to execute the full command, allowing I/O redirection like <, >.
     const dockerArgs = [
-      'run', '--rm', '--network=none',
+      'run',
+      '-i', // FIX: Re-add the '-i' flag to keep STDIN open, preventing the shell from hanging.
+      '--rm', '--network=none',
       `--memory=${Math.floor(MEMORY_LIMIT_KB / 1024)}m`,
       '--cpus=1',
       '-v', `${resolvedHostDir}:${containerDir}`,
       '-w', containerDir,
       image,
-      'sh', '-c', commandString // The key change!
+      'sh', '-c', commandString
     ];
 
     const proc = spawn('docker', dockerArgs);
@@ -151,20 +152,17 @@ async function processSubmission(submissionId) {
       if (memoryKB > maxMemory) maxMemory = memoryKB;
 
       if (execResult.timedOut) {
-        // FIX: Use totalRuntime instead of runtime
         await updateSubmission(sub._id, userId, { status: 'Time Limit Exceeded', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length } });
         return;
       }
 
       if (memoryKB > MEMORY_LIMIT_KB) {
-        // FIX: Use totalRuntime instead of runtime
         await updateSubmission(sub._id, userId, { status: 'Memory Limit Exceeded', runtime: totalRuntime, memory: Math.round(memoryKB / 1024), result: { passedCount, totalCount: testcases.length } });
         return;
       }
 
       if (execResult.code !== 0) {
         const stderr = await fs.readFile(path.join(tmpdir, errorFile), 'utf8').catch(() => 'Runtime Error');
-        // FIX: Use totalRuntime instead of runtime
         await updateSubmission(sub._id, userId, { status: 'Runtime Error', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length, error: stderr } });
         return;
       }
