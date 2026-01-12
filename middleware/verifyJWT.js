@@ -13,7 +13,9 @@ const verifyJWT =  (req, res, next) => {
         process.env.JWT_ACCESS_TOKEN_SECRET,
         async (err, decoded) => {
             if(err) return res.status(403).json({ message: "Authentication error"});
-            const user = await User.findById(decoded.userId);
+            console.log(decoded);
+            const user = await User.findById(decoded.UserInfo.userId);
+            console.log(user);
             req.user = user;
             next();
         }
