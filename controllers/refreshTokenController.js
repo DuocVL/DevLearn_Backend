@@ -1,9 +1,14 @@
 const jwt = require('jsonwebtoken');
 const RefreshTokens = require('../models/RefreshTokens');
-const { upsertRefreshToken } = require('./refreshHelper');
+const Users = require('../models/User'); // Added: Import the User model
+const { upsertRefreshToken } = require('../services/tokenService');
 
-const signTokenPair = (userId, email) => {
-    const accessToken = jwt.sign({ userId, email }, process.env.JWT_ACCESS_TOKEN_SECRET, { expiresIn: '15m' });
+const signTokenPair = (userId, email, roles) => {
+    const accessToken = jwt.sign(
+        { "UserInfo": { "userId": userId, "email": email, "roles": roles } }, // Added: email to payload
+        process.env.JWT_ACCESS_TOKEN_SECRET, 
+        { expiresIn: '15m' }
+    );
     const refreshToken = jwt.sign({ userId, email }, process.env.JWT_REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
     return { accessToken, refreshToken };
 };
@@ -23,10 +28,11 @@ const handleRefreshToken = async (req, res) => {
             return res.status(401).json({ message: 'Invalid refresh token' });
         }
 
-        // create new token pair (rotate)
-        const { accessToken, refreshToken } = signTokenPair(decoded.userId, decoded.email);
+        const foundUser = await Users.findById(decoded.userId).exec();
+        if (!foundUser) return res.status(401).json({ message: 'Unauthorized' });
 
-        // rotate: update existing document or upsert new one
+        const { accessToken, refreshToken } = signTokenPair(decoded.userId, decoded.email, foundUser.roles);
+
         await upsertRefreshToken(decoded.userId, decoded.email, refreshToken);
 
         return res.status(200).json({ accessToken, refreshToken });
