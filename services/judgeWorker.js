@@ -5,7 +5,7 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
-const { redisClient } = require('../config/redis');
+const { redisWorkerClient } = require('../config/redis');
 const { getLanguageConfig } = require('../config/languageConfig'); // NEW: Import language config
 const socketService = require('./socketService');
 
@@ -191,7 +191,7 @@ async function startWorker() {
   console.log('Judge worker started. Waiting for submissions.');
   while (!isStopping) {
     try {
-      const result = await redisClient.brPop(SUBMISSION_QUEUE, 0);
+      const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
       if (result && !isStopping) {
         const submissionId = result.element;
         console.log(`Processing submission: ${submissionId}`);
@@ -219,7 +219,7 @@ function stopWorker() {
     console.log('Stopping judge worker...');
     isStopping = true;
     // Disconnect the client to unblock brPop
-    redisClient.disconnect().catch(err => console.error('Error disconnecting redis for worker shutdown', err));
+    redisWorkerClient.disconnect().catch(err => console.error('Error disconnecting redis for worker shutdown', err));
   }
 }
 
