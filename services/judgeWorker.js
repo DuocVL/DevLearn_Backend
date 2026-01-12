@@ -5,31 +5,36 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
-const { redisWorkerClient } = require('../config/redis'); // Correctly import the client
+const { redisClient } = require('../config/redis');
+const { getLanguageConfig } = require('../config/languageConfig'); // NEW: Import language config
 const socketService = require('./socketService');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
-const DEFAULT_TIMEOUT_MS = 3000;
+const COMPILE_TIMEOUT_MS = 10000; // 10 seconds for compilation
+const EXECUTE_TIMEOUT_MS = 3000;   // 3 seconds for execution per test case
 
-// (The rest of the file remains the same...)
+// --- Helper Functions ---
 
-// Helper to update submission and notify clients
-async function updateSubmissionStatus(submissionId, userId, updateData) {
-    const submission = await Submissions.findByIdAndUpdate(submissionId, updateData, { new: true });
+/**
+ * Updates a submission's status and notifies the client via WebSocket.
+ */
+async function updateSubmission(submissionId, userId, updateData) {
+    const submission = await Submissions.findByIdAndUpdate(submissionId, { $set: updateData }, { new: true });
     if (submission) {
-        // The event that the client will listen for
-        const eventType = 'submission_update'; 
-        console.log(`Notifying user ${userId} about ${eventType}`);
-        socketService.sendToUser(userId, { 
+        const eventType = 'submission_update';
+        console.log(`Notifying user ${userId} about ${eventType}: ${submission.status}`);
+        socketService.sendToUser(userId.toString(), { 
             type: eventType,
-            payload: submission.toObject() // Send the full updated submission object
+            payload: submission.toObject()
         });
     }
     return submission;
 }
 
-
-async function runCommand(image, hostDir, command, args, options = {}, input = '', timeout = DEFAULT_TIMEOUT_MS) {
+/**
+ * Runs a command inside a Docker container with resource limits.
+ */
+async function runInDocker(image, hostDir, command, args, input = '', timeout = EXECUTE_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const containerDir = '/usr/src/app';
     const resolvedHostDir = path.resolve(hostDir);
@@ -39,29 +44,35 @@ async function runCommand(image, hostDir, command, args, options = {}, input = '
       '-w', containerDir, image, command, ...args
     ];
 
-    const proc = spawn('docker', dockerArgs, options);
+    const proc = spawn('docker', dockerArgs);
     let stdout = '', stderr = '', timedOut = false;
 
-    const to = setTimeout(() => {
+    const timer = setTimeout(() => {
       timedOut = true;
-      try { proc.kill('SIGKILL'); } catch (e) {}
+      try { proc.kill('SIGKILL'); } catch (e) { /* ignore */ }
     }, timeout);
 
     proc.stdout.on('data', (d) => { stdout += d.toString(); });
     proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
     proc.on('close', (code, signal) => {
-      clearTimeout(to);
+      clearTimeout(timer);
       resolve({ code, signal, stdout, stderr, timedOut });
     });
+    
+    proc.on('error', (err) => {
+        clearTimeout(timer);
+        resolve({ code: 1, signal: null, stdout: '', stderr: err.message, timedOut: false, internalError: true });
+    });
 
-    if (input) {
-        try { proc.stdin.write(input); proc.stdin.end(); } catch (e) {}
-    } else {
-        try { proc.stdin.end(); } catch(e) {}
-    }
+    try {
+        proc.stdin.write(input);
+        proc.stdin.end();
+    } catch (e) { /* Stdin may be closed */ }
   });
 }
+
+// --- Main Submission Processing Logic ---
 
 async function processSubmission(submissionId) {
   if (!mongoose.Types.ObjectId.isValid(submissionId)) {
@@ -74,132 +85,146 @@ async function processSubmission(submissionId) {
     console.error(`Submission ${submissionId} not found.`);
     return;
   }
+
   const userId = sub.userId;
+  await updateSubmission(sub._id, userId, { status: 'Running', result: { passedCount: 0, totalCount: 0 } });
 
-  // Mark as 'Running' and notify
-  sub = await updateSubmissionStatus(sub._id, userId, { status: 'Running' });
+  const [problem, langConfig] = await Promise.all([
+      Problems.findById(sub.problemId).lean(),
+      getLanguageConfig(sub.language)
+  ]);
 
-  const problem = await Problems.findById(sub.problemId).lean();
-  const testcases = problem?.testcases || [];
+  if (!langConfig) {
+    await updateSubmission(sub._id, userId, { status: 'Runtime Error', result: { error: `Language ${sub.language} not supported.` } });
+    return;
+  }
+
   const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'judge-'));
 
   try {
-    let image, compileCmd, runCmd, srcFileName;
-    
-    switch (sub.language) {
-        case 'python':
-          image = 'python:3.9-slim';
-          srcFileName = 'main.py';
-          runCmd = { cmd: 'python3', args: ['main.py'] };
-          break;
-        case 'javascript':
-          image = 'node:18-slim';
-          srcFileName = 'main.js';
-          runCmd = { cmd: 'node', args: ['main.js'] };
-          break;
-        case 'cpp':
-          image = 'gcc:11';
-          srcFileName = 'main.cpp';
-          compileCmd = { cmd: 'g++', args: ['-O2', '-std=c++17', 'main.cpp', '-o', 'a.out'] };
-          runCmd = { cmd: './a.out', args: [] };
-          break;
-        default:
-          await updateSubmissionStatus(sub._id, userId, { status: 'Runtime Error', result: { error: `Language ${sub.language} not supported.` } });
-          return;
-      }
+    fs.writeFileSync(path.join(tmpdir, langConfig.srcFileName), sub.code);
 
-    fs.writeFileSync(path.join(tmpdir, srcFileName), sub.code);
-
-    if (compileCmd) {
-      const comp = await runCommand(image, tmpdir, compileCmd.cmd, compileCmd.args, {}, '', 10000);
+    // 1. COMPILE STEP (if needed)
+    if (langConfig.compileCmd) {
+      await updateSubmission(sub._id, userId, { status: 'Compiling' });
+      const comp = await runInDocker(langConfig.image, tmpdir, langConfig.compileCmd.cmd, langConfig.compileCmd.args, '', COMPILE_TIMEOUT_MS);
       if (comp.code !== 0 || comp.timedOut) {
-        await updateSubmissionStatus(sub._id, userId, { status: 'Compilation Error', result: { error: comp.stderr || comp.stdout } });
+        await updateSubmission(sub._id, userId, { status: 'Compilation Error', result: { error: comp.stderr || comp.stdout || 'Compilation Timed Out' } });
         return;
       }
     }
 
-    let passed = 0, firstFail = null, totalTime = 0;
+    // 2. EXECUTION STEP
+    const testcases = problem?.testcases || [];
+    let passed = 0, totalTime = 0, firstFail = null;
+
     for (let i = 0; i < testcases.length; i++) {
-        const t = testcases[i];
-        // Notify progress before running each test case
-        await updateSubmissionStatus(sub._id, userId, { status: 'Running', result: { passedCount: passed, totalCount: testcases.length } });
+      const t = testcases[i];
+      await updateSubmission(sub._id, userId, { status: 'Running', result: { passedCount: passed, totalCount: testcases.length } });
 
-        const input = t.input || '';
-        const expected = (t.output || '').toString().trim();
-        const startTime = Date.now();
-        const res = await runCommand(image, tmpdir, runCmd.cmd, runCmd.args, {}, input, DEFAULT_TIMEOUT_MS);
-        totalTime += (Date.now() - startTime);
+      const input = t.input || '';
+      const startTime = Date.now();
+      const res = await runInDocker(langConfig.image, tmpdir, langConfig.runCmd.cmd, langConfig.runCmd.args, input, EXECUTE_TIMEOUT_MS);
+      totalTime += (Date.now() - startTime);
 
-        if (res.timedOut) {
-            await updateSubmissionStatus(sub._id, userId, { status: 'Time Limit Exceeded', runtime: totalTime, result: { passedCount: passed, totalCount: testcases.length } });
-            return;
-        }
-        if (res.code !== 0) {
-            await updateSubmissionStatus(sub._id, userId, { status: 'Runtime Error', runtime: totalTime, result: { passedCount: passed, totalCount: testcases.length, error: res.stderr } });
-            return;
-        }
+      if (res.timedOut) {
+        await updateSubmission(sub._id, userId, { status: 'Time Limit Exceeded', runtime: totalTime, result: { passedCount: passed, totalCount: testcases.length } });
+        return;
+      }
+      // Check for Memory Limit Exceeded (OOM Killer)
+      if (res.code === 137) { // 137 = 128 (fatal error signal) + 9 (SIGKILL)
+        await updateSubmission(sub._id, userId, { status: 'Memory Limit Exceeded', runtime: totalTime, result: { passedCount: passed, totalCount: testcases.length } });
+        return;
+      }
+      // REAL RUNTIME ERROR: code is not 0 (crash, exception etc.)
+      if (res.code !== 0) {
+        await updateSubmission(sub._id, userId, { status: 'Runtime Error', runtime: totalTime, result: { passedCount: passed, totalCount: testcases.length, error: res.stderr } });
+        return;
+      }
 
-        const out = (res.stdout || '').toString().trim();
-        if (out === expected) {
-            passed++;
-        } else {
-            firstFail = { input: t.input, expectedOutput: expected, userOutput: out };
-            break;
-        }
+      const expected = (t.output || '').toString().trim();
+      const actual = (res.stdout || '').toString().trim();
+      
+      if (actual === expected) {
+        passed++;
+      } else {
+        firstFail = { 
+            input: t.isHidden ? 'Hidden Test Case' : t.input, 
+            expectedOutput: t.isHidden ? 'Hidden Test Case' : expected, 
+            userOutput: actual 
+        };
+        break;
+      }
     }
 
+    // 3. FINAL VERDICT
     const status = (passed === testcases.length) ? 'Accepted' : 'Wrong Answer';
     const finalResult = { passedCount: passed, totalCount: testcases.length };
     if (firstFail) finalResult.failedTestcases = firstFail;
-    await updateSubmissionStatus(sub._id, userId, { status, result: finalResult, runtime: totalTime });
+
+    await updateSubmission(sub._id, userId, { status, result: finalResult, runtime: totalTime });
 
     if (status === 'Accepted') {
-        await Problems.findByIdAndUpdate(sub.problemId, { $inc: { acceptedSubmissions: 1, totalSubmissions: 1 } });
+      await Problems.findByIdAndUpdate(sub.problemId, { $inc: { acceptedSubmissions: 1, totalSubmissions: 1 } });
     } else {
-        await Problems.findByIdAndUpdate(sub.problemId, { $inc: { totalSubmissions: 1 } });
+      await Problems.findByIdAndUpdate(sub.problemId, { $inc: { totalSubmissions: 1 } });
     }
 
   } catch (err) {
-    console.error(`Error processing submission ${submissionId}:`, err);
+    console.error(`Critical error processing submission ${submissionId}:`, err);
     try {
-      await updateSubmissionStatus(submissionId, userId, { status: 'Runtime Error', result: { error: 'An internal error occurred in the judge.' } });
+      await updateSubmission(submissionId, userId, { status: 'Runtime Error', result: { error: 'An internal judge error occurred.' } });
     } catch (updateErr) {
-      console.error(`Failed to update submission status to error for ID ${submissionId}:`, updateErr);
+      console.error(`Failed to update submission status after critical error for ID ${submissionId}:`, updateErr);
     }
   } finally {
-    try { fs.rmSync(tmpdir, { recursive: true, force: true }); } catch (e) {}
+    // Always clean up the temporary directory
+    try { fs.rmSync(tmpdir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
   }
 }
 
-let _stopping = false;
+// --- Worker Lifecycle ---
+
+let isStopping = false;
 
 async function startWorker() {
-  console.log('Judge worker starting... Waiting for submissions.');
-  while (!_stopping) {
+  console.log('Judge worker started. Waiting for submissions.');
+  while (!isStopping) {
     try {
-      // Use a blocking pop with a timeout to allow for graceful shutdown.
-      const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
-      if (result) {
+      const result = await redisClient.brPop(SUBMISSION_QUEUE, 0);
+      if (result && !isStopping) {
         const submissionId = result.element;
         console.log(`Processing submission: ${submissionId}`);
-        await processSubmission(submissionId);
+        // Don't await here, process in the background
+        processSubmission(submissionId).catch(err => {
+            console.error(`Unhandled exception in processSubmission for ${submissionId}:`, err);
+        });
       }
     } catch (err) {
-       if (err.message.includes('Connection is closed')) {
-                console.log('Redis connection closed, stopping worker.');
-                break; // Exit the loop if Redis connection is closed
-            }
+      if (isStopping || err.message.includes('Connection is closed')) {
+        console.log('Redis connection closed, stopping worker loop.');
+        break;
+      }
       console.error('Worker loop error:', err);
-      if (!_stopping) {
-        await new Promise((r) => setTimeout(r, 5000));
+      if (!isStopping) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
   }
-  console.log('Judge worker stopping.');
+  console.log('Judge worker stopped.');
 }
 
 function stopWorker() {
-  _stopping = true;
+  if (!isStopping) {
+    console.log('Stopping judge worker...');
+    isStopping = true;
+    // Disconnect the client to unblock brPop
+    redisClient.disconnect().catch(err => console.error('Error disconnecting redis for worker shutdown', err));
+  }
 }
+
+// Graceful shutdown
+process.on('SIGTERM', stopWorker);
+process.on('SIGINT', stopWorker);
 
 module.exports = { startWorker, stopWorker };
