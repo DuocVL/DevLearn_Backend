@@ -5,19 +5,14 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
-const { redisWorkerClient } = require('../config/redis');
-const { getLanguageConfig } = require('../config/languageConfig'); // NEW: Import language config
+const { redisWorkerClient } = require('../config/redis'); // FIX: Use the dedicated worker client
+const { getLanguageConfig } = require('../config/languageConfig');
 const socketService = require('./socketService');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
-const COMPILE_TIMEOUT_MS = 10000; // 10 seconds for compilation
-const EXECUTE_TIMEOUT_MS = 3000;   // 3 seconds for execution per test case
+const COMPILE_TIMEOUT_MS = 10000;
+const EXECUTE_TIMEOUT_MS = 3000;
 
-// --- Helper Functions ---
-
-/**
- * Updates a submission's status and notifies the client via WebSocket.
- */
 async function updateSubmission(submissionId, userId, updateData) {
     const submission = await Submissions.findByIdAndUpdate(submissionId, { $set: updateData }, { new: true });
     if (submission) {
@@ -31,15 +26,12 @@ async function updateSubmission(submissionId, userId, updateData) {
     return submission;
 }
 
-/**
- * Runs a command inside a Docker container with resource limits.
- */
 async function runInDocker(image, hostDir, command, args, input = '', timeout = EXECUTE_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const containerDir = '/usr/src/app';
     const resolvedHostDir = path.resolve(hostDir);
     const dockerArgs = [
-      'run', '--rm', '--network=none', '--memory=256m', '--cpus=1',
+      'run', '-i', '--rm', '--network=none', '--memory=256m', '--cpus=1',
       '-v', `${resolvedHostDir}:${containerDir}`,
       '-w', containerDir, image, command, ...args
     ];
@@ -72,9 +64,8 @@ async function runInDocker(image, hostDir, command, args, input = '', timeout = 
   });
 }
 
-// --- Main Submission Processing Logic ---
-
 async function processSubmission(submissionId) {
+  // (logic inside this function remains the same)
   if (!mongoose.Types.ObjectId.isValid(submissionId)) {
     console.error(`Invalid submissionId: ${submissionId}`);
     return;
@@ -104,7 +95,6 @@ async function processSubmission(submissionId) {
   try {
     fs.writeFileSync(path.join(tmpdir, langConfig.srcFileName), sub.code);
 
-    // 1. COMPILE STEP (if needed)
     if (langConfig.compileCmd) {
       await updateSubmission(sub._id, userId, { status: 'Compiling' });
       const comp = await runInDocker(langConfig.image, tmpdir, langConfig.compileCmd.cmd, langConfig.compileCmd.args, '', COMPILE_TIMEOUT_MS);
@@ -114,7 +104,6 @@ async function processSubmission(submissionId) {
       }
     }
 
-    // 2. EXECUTION STEP
     const testcases = problem?.testcases || [];
     let passed = 0, totalTime = 0, firstFail = null;
 
@@ -131,12 +120,10 @@ async function processSubmission(submissionId) {
         await updateSubmission(sub._id, userId, { status: 'Time Limit Exceeded', runtime: totalTime, result: { passedCount: passed, totalCount: testcases.length } });
         return;
       }
-      // Check for Memory Limit Exceeded (OOM Killer)
-      if (res.code === 137) { // 137 = 128 (fatal error signal) + 9 (SIGKILL)
+      if (res.code === 137) {
         await updateSubmission(sub._id, userId, { status: 'Memory Limit Exceeded', runtime: totalTime, result: { passedCount: passed, totalCount: testcases.length } });
         return;
       }
-      // REAL RUNTIME ERROR: code is not 0 (crash, exception etc.)
       if (res.code !== 0) {
         await updateSubmission(sub._id, userId, { status: 'Runtime Error', runtime: totalTime, result: { passedCount: passed, totalCount: testcases.length, error: res.stderr } });
         return;
@@ -157,7 +144,6 @@ async function processSubmission(submissionId) {
       }
     }
 
-    // 3. FINAL VERDICT
     const status = (passed === testcases.length) ? 'Accepted' : 'Wrong Answer';
     const finalResult = { passedCount: passed, totalCount: testcases.length };
     if (firstFail) finalResult.failedTestcases = firstFail;
@@ -178,12 +164,9 @@ async function processSubmission(submissionId) {
       console.error(`Failed to update submission status after critical error for ID ${submissionId}:`, updateErr);
     }
   } finally {
-    // Always clean up the temporary directory
     try { fs.rmSync(tmpdir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
   }
 }
-
-// --- Worker Lifecycle ---
 
 let isStopping = false;
 
@@ -191,11 +174,11 @@ async function startWorker() {
   console.log('Judge worker started. Waiting for submissions.');
   while (!isStopping) {
     try {
+      // FIX: Use the worker client for blocking pop
       const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
       if (result && !isStopping) {
         const submissionId = result.element;
         console.log(`Processing submission: ${submissionId}`);
-        // Don't await here, process in the background
         processSubmission(submissionId).catch(err => {
             console.error(`Unhandled exception in processSubmission for ${submissionId}:`, err);
         });
@@ -218,12 +201,11 @@ function stopWorker() {
   if (!isStopping) {
     console.log('Stopping judge worker...');
     isStopping = true;
-    // Disconnect the client to unblock brPop
+    // FIX: Disconnect the correct worker client
     redisWorkerClient.disconnect().catch(err => console.error('Error disconnecting redis for worker shutdown', err));
   }
 }
 
-// Graceful shutdown
 process.on('SIGTERM', stopWorker);
 process.on('SIGINT', stopWorker);
 
