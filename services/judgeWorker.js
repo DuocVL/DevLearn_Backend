@@ -15,38 +15,26 @@ const COMPILE_TIMEOUT_MS = 10000; // 10s
 const EXECUTE_TIMEOUT_MS = 3000;  // 3s per test case
 const MEMORY_LIMIT_KB = 256 * 1024; // 256MB in KB
 
-// --- Helper Functions ---
-
 async function updateSubmission(submissionId, userId, updateData) {
     const submission = await Submissions.findByIdAndUpdate(submissionId, { $set: updateData }, { new: true });
     if (submission) {
         const eventType = 'submission_update';
         console.log(`Notifying user ${userId} about ${eventType}: ${submission.status}`);
-        socketService.sendToUser(userId.toString(), {
-            type: eventType,
-            payload: submission.toObject()
-        });
+        socketService.sendToUser(userId.toString(), { type: eventType, payload: submission.toObject() });
     }
     return submission;
 }
 
-/**
- * NEW: Executes a shell command inside a Docker container using file-based I/O.
- */
 async function runInDocker(image, hostDir, commandString, timeout) {
   return new Promise((resolve) => {
     const containerDir = '/usr/src/app';
     const resolvedHostDir = path.resolve(hostDir);
 
     const dockerArgs = [
-      'run',
-      '-i', // FIX: Re-add the '-i' flag to keep STDIN open, preventing the shell from hanging.
-      '--rm', '--network=none',
-      `--memory=${Math.floor(MEMORY_LIMIT_KB / 1024)}m`,
-      '--cpus=1',
+      'run', '-i', '--rm', '--network=none',
+      `--memory=${Math.floor(MEMORY_LIMIT_KB / 1024)}m`, '--cpus=1',
       '-v', `${resolvedHostDir}:${containerDir}`,
-      '-w', containerDir,
-      image,
+      '-w', containerDir, image,
       'sh', '-c', commandString
     ];
 
@@ -70,20 +58,13 @@ async function runInDocker(image, hostDir, commandString, timeout) {
   });
 }
 
-/**
- * NEW: Parses the verbose output of /usr/bin/time to get memory and time usage.
- */
 function parseTimeOutput(timeOutput) {
     const memoryMatch = timeOutput.match(/Maximum resident set size \(kbytes\): (\d+)/);
     const timeMatch = timeOutput.match(/User time \(seconds\): ([\d.]+)/);
-    
     const memoryKB = memoryMatch ? parseInt(memoryMatch[1], 10) : 0;
     const timeSec = timeMatch ? parseFloat(timeMatch[1]) : 0;
-
     return { memoryKB, timeMs: timeSec * 1000 };
 }
-
-// --- Main Submission Processing Logic ---
 
 async function processSubmission(submissionId) {
   if (!mongoose.Types.ObjectId.isValid(submissionId)) {
@@ -112,11 +93,11 @@ async function processSubmission(submissionId) {
   try {
     await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), sub.code);
 
-    // 1. COMPILE STEP (if needed)
     if (langConfig.compileCmd) {
       await updateSubmission(sub._id, userId, { status: 'Compiling' });
-      const compileCommand = `${langConfig.compileCmd.cmd} ${langConfig.compileCmd.args.join(' ')} > /dev/null 2> error.log`;
-      const compResult = await runInDocker(langConfig.image, tmpdir, compileCommand, COMPILE_TIMEOUT_MS);
+      const compileScript = `#!/bin/sh\nset -e\n${langConfig.compileCmd.cmd} ${langConfig.compileCmd.args.join(' ')} > /dev/null 2> error.log`;
+      await fs.writeFile(path.join(tmpdir, 'compile.sh'), compileScript);
+      const compResult = await runInDocker(langConfig.image, tmpdir, 'chmod +x compile.sh && ./compile.sh', COMPILE_TIMEOUT_MS);
 
       if (compResult.code !== 0) {
         const stderr = await fs.readFile(path.join(tmpdir, 'error.log'), 'utf8').catch(() => 'Compilation Failed');
@@ -125,7 +106,6 @@ async function processSubmission(submissionId) {
       }
     }
 
-    // 2. EXECUTION STEP (for each test case)
     const testcases = problem?.testcases || [];
     let passedCount = 0;
     let totalRuntime = 0;
@@ -135,16 +115,16 @@ async function processSubmission(submissionId) {
       const t = testcases[i];
       await updateSubmission(sub._id, userId, { status: 'Running', result: { passedCount, totalCount: testcases.length } });
 
-      const inputFile = 'input.txt';
-      const outputFile = 'output.txt';
-      const errorFile = 'error.log';
-      const timeFile = 'time.log';
-
+      const inputFile = 'input.txt', outputFile = 'output.txt', errorFile = 'error.log', timeFile = 'time.log';
       await fs.writeFile(path.join(tmpdir, inputFile), t.input || '');
       
+      // EXPERT UPGRADE: Create a self-contained runner script
       const runCommand = `${langConfig.runCmd.cmd} ${langConfig.runCmd.args.join(' ')}`;
-      const execString = `/usr/bin/time -v -o ${timeFile} ${runCommand} < ${inputFile} > ${outputFile} 2> ${errorFile}`;
-      const execResult = await runInDocker(langConfig.image, tmpdir, execString, EXECUTE_TIMEOUT_MS);
+      const runnerScript = `#!/bin/sh\nset -e\n/usr/bin/time -v -o ${timeFile} ${runCommand} < ${inputFile} > ${outputFile} 2> ${errorFile}`;
+      await fs.writeFile(path.join(tmpdir, 'run.sh'), runnerScript);
+      
+      // The command sent to Docker is now simple and reliable
+      const execResult = await runInDocker(langConfig.image, tmpdir, 'chmod +x run.sh && ./run.sh', EXECUTE_TIMEOUT_MS);
 
       const timeLog = await fs.readFile(path.join(tmpdir, timeFile), 'utf8').catch(() => '');
       const { memoryKB, timeMs } = parseTimeOutput(timeLog);
@@ -155,12 +135,10 @@ async function processSubmission(submissionId) {
         await updateSubmission(sub._id, userId, { status: 'Time Limit Exceeded', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length } });
         return;
       }
-
       if (memoryKB > MEMORY_LIMIT_KB) {
-        await updateSubmission(sub._id, userId, { status: 'Memory Limit Exceeded', runtime: totalRuntime, memory: Math.round(memoryKB / 1024), result: { passedCount, totalCount: testcases.length } });
+        await updateSubmission(sub._id, userId, { status: 'Memory Limit Exceeded', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length } });
         return;
       }
-
       if (execResult.code !== 0) {
         const stderr = await fs.readFile(path.join(tmpdir, errorFile), 'utf8').catch(() => 'Runtime Error');
         await updateSubmission(sub._id, userId, { status: 'Runtime Error', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length, error: stderr } });
@@ -168,36 +146,21 @@ async function processSubmission(submissionId) {
       }
       
       const userOutput = await fs.readFile(path.join(tmpdir, outputFile), 'utf8').catch(() => '');
-      const expectedOutput = (t.output || '').trim();
       const actualOutput = userOutput.trim();
+      const expectedOutput = (t.output || '').trim();
 
       if (actualOutput === expectedOutput) {
         passedCount++;
       } else {
-        const failedTestcase = {
-          input: t.isHidden ? 'Hidden Test Case' : t.input,
-          expectedOutput: t.isHidden ? 'Hidden Test Case' : expectedOutput,
-          userOutput: actualOutput
-        };
-        await updateSubmission(sub._id, userId, { status: 'Wrong Answer', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length, failedTestcases: failedTestcase } });
+        await updateSubmission(sub._id, userId, { status: 'Wrong Answer', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length, failedTestcases: { input: t.isHidden ? 'Hidden' : t.input, expectedOutput: t.isHidden ? 'Hidden' : expectedOutput, userOutput: actualOutput } } });
         return;
       }
     }
 
-    // 3. FINAL VERDICT
     const finalStatus = (passedCount === testcases.length) ? 'Accepted' : 'Wrong Answer';
-    await updateSubmission(sub._id, userId, {
-      status: finalStatus,
-      runtime: totalRuntime,
-      memory: Math.round(maxMemory / 1024),
-      result: { passedCount, totalCount: testcases.length }
-    });
+    await updateSubmission(sub._id, userId, { status: finalStatus, runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length }});
     
-    if (finalStatus === 'Accepted') {
-        await Problems.findByIdAndUpdate(sub.problemId, { $inc: { acceptedSubmissions: 1, totalSubmissions: 1 } });
-    } else {
-        await Problems.findByIdAndUpdate(sub.problemId, { $inc: { totalSubmissions: 1 } });
-    }
+    await Problems.findByIdAndUpdate(sub.problemId, { $inc: { totalSubmissions: 1, ...(finalStatus === 'Accepted' && { acceptedSubmissions: 1 }) } });
 
   } catch (err) {
     console.error(`Critical error processing submission ${submissionId}:`, err);
@@ -207,7 +170,7 @@ async function processSubmission(submissionId) {
   }
 }
 
-// --- Worker Lifecycle ---
+// --- Worker Lifecycle (No changes) ---
 
 let isStopping = false;
 
