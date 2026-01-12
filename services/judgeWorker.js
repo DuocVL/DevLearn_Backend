@@ -5,7 +5,7 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
-const { redisClient } = require('../config/redis'); // Correctly import the client
+const { redisWorkerClient } = require('../config/redis'); // Correctly import the client
 const socketService = require('./socketService');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
@@ -178,7 +178,7 @@ async function startWorker() {
   while (!_stopping) {
     try {
       // Use a blocking pop with a timeout to allow for graceful shutdown.
-      const result = await redisClient.brPop(SUBMISSION_QUEUE, 0);
+      const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
       if (result) {
         const submissionId = result.element;
         console.log(`Processing submission: ${submissionId}`);
