@@ -14,7 +14,7 @@ const SUBMISSION_QUEUE = 'submissionQueue';
 const COMPILE_TIMEOUT_MS = 10000;
 const EXECUTE_TIMEOUT_MS = 3000;
 const MEMORY_LIMIT_KB = 256 * 1024;
-const USER_CODE_PLACEHOLDER = '//{{USER_CODE}}'; // Placeholder for LeetCode-style templating
+const USER_CODE_PLACEHOLDER = '//{{USER_CODE}}';
 
 async function updateSubmission(submissionId, userId, updateData) {
     const submission = await Submissions.findByIdAndUpdate(submissionId, { $set: updateData }, { new: true });
@@ -56,9 +56,6 @@ function parseTimeOutput(timeOutput) {
     return { memoryKB, timeMs: timeSec * 1000 };
 }
 
-
-// --- Main Submission Processing Logic (with Templating) ---
-
 async function processSubmission(submissionId) {
   if (!mongoose.Types.ObjectId.isValid(submissionId)) {
     console.error(`Invalid submissionId: ${submissionId}`);
@@ -83,20 +80,30 @@ async function processSubmission(submissionId) {
 
   // --- LEETCODE-STYLE TEMPLATING LOGIC ---
   const codeTemplate = problem.codeTemplates?.find(t => t.language === sub.language);
-  let finalCode = sub.code; // Default to user code if no template exists
+  let finalCode = sub.code;
   if (codeTemplate) {
       if (!codeTemplate.template.includes(USER_CODE_PLACEHOLDER)) {
-          await updateSubmission(sub._id, userId, { status: 'Runtime Error', result: { error: `Problem Misconfiguration: Code template for ${sub.language} is missing the placeholder.` } });
+          await updateSubmission(sub._id, userId, { status: 'Runtime Error', result: { error: `Problem Misconfiguration: Code template for ${sub.language} is missing placeholder.` } });
           return;
       }
-      finalCode = codeTemplate.template.replace(USER_CODE_PLACEHOLDER, sub.code);
-  } 
+      
+      let generatedCode = codeTemplate.template.replace(USER_CODE_PLACEHOLDER, sub.code);
+
+      // --- HOT-PATCH for silent `except: pass` blocks in Python templates ---
+      if (sub.language === 'python') {
+          const badPattern = /except Exception as e:\s*pass/g;
+          const patch = 'except Exception as e:\n        import sys, traceback\n        traceback.print_exc(file=sys.stderr)\n        raise';
+          generatedCode = generatedCode.replace(badPattern, patch);
+      }
+      // --- END HOT-PATCH ---
+      
+      finalCode = generatedCode;
+  }
   // --- END OF TEMPLATING LOGIC ---
   
   const tmpdir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'judge-'));
 
   try {
-    // Write the final, combined code to the source file
     await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), finalCode);
 
     if (langConfig.compileCmd) {
@@ -141,7 +148,7 @@ async function processSubmission(submissionId) {
         return;
       }
       if (execResult.code !== 0) {
-        const stderr = await fs.readFile(path.join(tmpdir, errorFile), 'utf8').catch(() => 'Runtime Error');
+        const stderr = await fs.readFile(path.join(tmpdir, errorFile), 'utf8').catch(() => 'Runtime Error without stderr');
         await updateSubmission(sub._id, userId, { status: 'Runtime Error', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length, error: stderr } });
         return;
       }
@@ -170,7 +177,7 @@ async function processSubmission(submissionId) {
   }
 }
 
-// --- Worker Lifecycle (No changes) ---
+// --- Worker Lifecycle ---
 
 let isStopping = false;
 
