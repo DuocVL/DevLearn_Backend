@@ -1,6 +1,6 @@
 const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
-const { redisClient } = require('../config/redis'); // Correctly import the client
+const { redisClient } = require('../config/redis');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
 
@@ -20,7 +20,6 @@ const createSubmission = async (req, res) => {
       status: 'Pending'
     });
 
-    // Now this command should execute without causing a timeout
     await redisClient.lPush(SUBMISSION_QUEUE, String(submission._id));
 
     return res.status(201).json({ message: 'Submission queued successfully', submissionId: submission._id });
@@ -46,4 +45,31 @@ const getSubmission = async (req, res) => {
   }
 };
 
-module.exports = { createSubmission, getSubmission };
+// NEW: Get a list of submissions
+const getSubmissions = async (req, res) => {
+  try {
+    const { problemId } = req.query;
+    const filter = {};
+
+    if (problemId) {
+      filter.problemId = problemId;
+    }
+
+    // Regular users can only see their own submissions.
+    // Admins can see all submissions for the given filter.
+    if (req.user.roles !== 'admin') {
+      filter.userId = req.user._id;
+    }
+
+    const submissions = await Submissions.find(filter)
+      .sort({ createdAt: -1 }) // Sort by most recent first
+      .lean();
+
+    return res.json({ submissions });
+  } catch (err) {
+    console.error('getSubmissions error', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+module.exports = { createSubmission, getSubmission, getSubmissions };
