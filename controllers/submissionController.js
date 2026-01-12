@@ -10,8 +10,10 @@ const createSubmission = async (req, res) => {
     const { problemId, language, code } = req.body;
     if (!problemId || !language || !code) return res.status(400).json({ message: 'Missing required fields' });
 
-    const problem = await Problems.findById(problemId);
-    if (!problem) return res.status(404).json({ message: 'Problem not found' });
+    // OPTIMIZATION: Use countDocuments for a much faster existence check.
+    // This is the key change to prevent timeouts.
+    const problemExists = await Problems.countDocuments({ _id: problemId });
+    if (problemExists === 0) return res.status(404).json({ message: 'Problem not found' });
 
     const submission = await Submissions.create({
       problemId,
@@ -24,6 +26,7 @@ const createSubmission = async (req, res) => {
     // Push the submission ID to the Redis queue
     await redisClient.lPush(SUBMISSION_QUEUE, String(submission._id));
 
+    // This response should now be sent quickly, before any timeout occurs.
     return res.status(201).json({ message: 'Submission queued successfully', submissionId: submission._id });
   } catch (err) {
     console.error('createSubmission error', err);
