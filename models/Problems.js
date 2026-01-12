@@ -1,38 +1,36 @@
 const mongoose = require('mongoose');
 
-const problemSchema = new mongoose.Schema({
+const testcaseSchema = new mongoose.Schema({
+    input: { type: String, default: '' },
+    output: { type: String, required: true },
+    isHidden: { type: Boolean, default: false }
+});
 
-    title: { type: String, required: true, unique: true},
-    slug: { type: String, unique: true, trim: true},
+const codeTemplateSchema = new mongoose.Schema({
+    language: { type: String, required: true },
+    template: { type: String, required: true } // Full code with a placeholder like //{{USER_CODE}}
+});
+
+const starterCodeSchema = new mongoose.Schema({
+    language: { type: String, required: true },
+    code: { type: String, required: true }      // Code shown to the user in the editor
+});
+
+const problemsSchema = new mongoose.Schema({
+    title: { type: String, required: true, unique: true },
     description: { type: String, required: true },
-    difficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'easy' },
+    difficulty: { type: String, enum: ['Easy', 'Medium', 'Hard'], required: true },
     tags: [String],
-    examples: [
-        { 
-            input: { type: String, required: true, }, 
-            output: { type: String, required: true, }, 
-            explanation: String 
-        }
-    ],
-    constraints: [String],//Giới hạn
-    hints: [String],//Gợi ý
-    testcases: [
-        {
-            input: { type: String, required: true },
-            output: { type: String, required: true },
-            isHidden: { type: Boolean, default: true },
-        }
-    ],
-    likeCount: { type: Number, default: 0 },
-    unlikeCount: { type: Number, default: 0},
-    commentCount: { type: Number, default: 0 },
-    hidden: { type: Boolean, default: false},
+    testcases: [testcaseSchema],
     
-    authorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Users' },
-    
-    totalSubmissions: { type: Number, default: 0},
-    acceptedSubmissions: { type: Number, default: 0},
-    
+    // -- NEW: LeetCode-style templating fields --
+    codeTemplates: [codeTemplateSchema],
+    starterCode: [starterCodeSchema],
+    // ------------------------------------------
+
+    totalSubmissions: { type: Number, default: 0 },
+    acceptedSubmissions: { type: Number, default: 0 },
+
 }, { timestamps: true });
 
-module.exports = mongoose.model('Problems', problemSchema);
+module.exports = mongoose.model('Problems', problemsSchema);

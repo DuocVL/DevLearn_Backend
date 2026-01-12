@@ -11,9 +11,10 @@ const { getLanguageConfig } = require('../config/languageConfig');
 const socketService = require('./socketService');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
-const COMPILE_TIMEOUT_MS = 10000; // 10s
-const EXECUTE_TIMEOUT_MS = 3000;  // 3s per test case
-const MEMORY_LIMIT_KB = 256 * 1024; // 256MB in KB
+const COMPILE_TIMEOUT_MS = 10000;
+const EXECUTE_TIMEOUT_MS = 3000;
+const MEMORY_LIMIT_KB = 256 * 1024;
+const USER_CODE_PLACEHOLDER = '//{{USER_CODE}}'; // Placeholder for LeetCode-style templating
 
 async function updateSubmission(submissionId, userId, updateData) {
     const submission = await Submissions.findByIdAndUpdate(submissionId, { $set: updateData }, { new: true });
@@ -29,7 +30,6 @@ async function runInDocker(image, hostDir, commandString, timeout) {
   return new Promise((resolve) => {
     const containerDir = '/usr/src/app';
     const resolvedHostDir = path.resolve(hostDir);
-
     const dockerArgs = [
       'run', '-i', '--rm', '--network=none',
       `--memory=${Math.floor(MEMORY_LIMIT_KB / 1024)}m`, '--cpus=1',
@@ -37,24 +37,14 @@ async function runInDocker(image, hostDir, commandString, timeout) {
       '-w', containerDir, image,
       'sh', '-c', commandString
     ];
-
     const proc = spawn('docker', dockerArgs);
     let timedOut = false;
-
     const timer = setTimeout(() => {
       timedOut = true;
       try { proc.kill('SIGKILL'); } catch (e) { /* ignore */ }
     }, timeout);
-
-    proc.on('close', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, timedOut });
-    });
-
-    proc.on('error', (err) => {
-        clearTimeout(timer);
-        resolve({ code: 1, signal: null, timedOut: false, internalError: true, stderr: err.message });
-    });
+    proc.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal, timedOut }); });
+    proc.on('error', (err) => { clearTimeout(timer); resolve({ code: 1, signal: null, timedOut: false, internalError: true, stderr: err.message }); });
   });
 }
 
@@ -65,6 +55,9 @@ function parseTimeOutput(timeOutput) {
     const timeSec = timeMatch ? parseFloat(timeMatch[1]) : 0;
     return { memoryKB, timeMs: timeSec * 1000 };
 }
+
+
+// --- Main Submission Processing Logic (with Templating) ---
 
 async function processSubmission(submissionId) {
   if (!mongoose.Types.ObjectId.isValid(submissionId)) {
@@ -83,15 +76,28 @@ async function processSubmission(submissionId) {
       getLanguageConfig(sub.language)
   ]);
 
-  if (!langConfig) {
-    await updateSubmission(sub._id, userId, { status: 'Runtime Error', result: { error: `Language '${sub.language}' is not supported.` } });
+  if (!problem || !langConfig) {
+    await updateSubmission(sub._id, userId, { status: 'Runtime Error', result: { error: 'Problem or Language not found.' } });
     return;
   }
+
+  // --- LEETCODE-STYLE TEMPLATING LOGIC ---
+  const codeTemplate = problem.codeTemplates?.find(t => t.language === sub.language);
+  let finalCode = sub.code; // Default to user code if no template exists
+  if (codeTemplate) {
+      if (!codeTemplate.template.includes(USER_CODE_PLACEHOLDER)) {
+          await updateSubmission(sub._id, userId, { status: 'Runtime Error', result: { error: `Problem Misconfiguration: Code template for ${sub.language} is missing the placeholder.` } });
+          return;
+      }
+      finalCode = codeTemplate.template.replace(USER_CODE_PLACEHOLDER, sub.code);
+  } 
+  // --- END OF TEMPLATING LOGIC ---
   
   const tmpdir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'judge-'));
 
   try {
-    await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), sub.code);
+    // Write the final, combined code to the source file
+    await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), finalCode);
 
     if (langConfig.compileCmd) {
       await updateSubmission(sub._id, userId, { status: 'Compiling' });
@@ -106,10 +112,8 @@ async function processSubmission(submissionId) {
       }
     }
 
-    const testcases = problem?.testcases || [];
-    let passedCount = 0;
-    let totalRuntime = 0;
-    let maxMemory = 0;
+    const testcases = problem.testcases || [];
+    let passedCount = 0, totalRuntime = 0, maxMemory = 0;
 
     for (let i = 0; i < testcases.length; i++) {
       const t = testcases[i];
@@ -118,18 +122,15 @@ async function processSubmission(submissionId) {
       const inputFile = 'input.txt', outputFile = 'output.txt', errorFile = 'error.log', timeFile = 'time.log';
       await fs.writeFile(path.join(tmpdir, inputFile), t.input || '');
       
-      // EXPERT UPGRADE: Create a self-contained runner script
       const runCommand = `${langConfig.runCmd.cmd} ${langConfig.runCmd.args.join(' ')}`;
       const runnerScript = `#!/bin/sh\nset -e\n/usr/bin/time -v -o ${timeFile} ${runCommand} < ${inputFile} > ${outputFile} 2> ${errorFile}`;
       await fs.writeFile(path.join(tmpdir, 'run.sh'), runnerScript);
       
-      // The command sent to Docker is now simple and reliable
       const execResult = await runInDocker(langConfig.image, tmpdir, 'chmod +x run.sh && ./run.sh', EXECUTE_TIMEOUT_MS);
 
       const timeLog = await fs.readFile(path.join(tmpdir, timeFile), 'utf8').catch(() => '');
       const { memoryKB, timeMs } = parseTimeOutput(timeLog);
-      totalRuntime += timeMs;
-      if (memoryKB > maxMemory) maxMemory = memoryKB;
+      totalRuntime += timeMs; if (memoryKB > maxMemory) maxMemory = memoryKB;
 
       if (execResult.timedOut) {
         await updateSubmission(sub._id, userId, { status: 'Time Limit Exceeded', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length } });
@@ -146,8 +147,7 @@ async function processSubmission(submissionId) {
       }
       
       const userOutput = await fs.readFile(path.join(tmpdir, outputFile), 'utf8').catch(() => '');
-      const actualOutput = userOutput.trim();
-      const expectedOutput = (t.output || '').trim();
+      const actualOutput = userOutput.trim(), expectedOutput = (t.output || '').trim();
 
       if (actualOutput === expectedOutput) {
         passedCount++;
