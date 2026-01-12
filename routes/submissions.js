@@ -1,5 +1,5 @@
 const router = require('express').Router();
-const { createSubmission, getSubmission } = require('../controllers/submissionController');
+const { createSubmission, getSubmissions, getSubmission } = require('../controllers/submissionController');
 
 
 // POST /submissions - Create a new submission
