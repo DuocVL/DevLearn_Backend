@@ -1,39 +1,42 @@
 const jwt = require('jsonwebtoken');
 const RefreshTokens = require('../models/RefreshTokens');
-const Users = require('../models/User'); // Added: Import the User model
-const { upsertRefreshToken } = require('../services/tokenService');
+const Users = require('../models/User');
+// CORRECT: Import both signTokenPair and upsertRefreshToken from the central service
+const { signTokenPair, upsertRefreshToken } = require('../services/tokenService');
 
-const signTokenPair = (userId, email, roles) => {
-    const accessToken = jwt.sign(
-        { "UserInfo": { "userId": userId, "email": email, "roles": roles } }, // Added: email to payload
-        process.env.JWT_ACCESS_TOKEN_SECRET, 
-        { expiresIn: '15m' }
-    );
-    const refreshToken = jwt.sign({ userId, email }, process.env.JWT_REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
-    return { accessToken, refreshToken };
-};
+// REMOVED: Inconsistent local signTokenPair function is deleted.
 
 const handleRefreshToken = async (req, res) => {
     try {
         const incoming = req.body?.refreshToken || req.headers['authorization']?.split(' ')[1] || req.headers['x-refresh-token'] || req.headers['x-refreshtoken'];
         if (!incoming) return res.status(400).json({ message: 'Missing refresh token' });
 
-        const tokenUser = await RefreshTokens.findOne({ refreshToken: incoming });
-        if (!tokenUser) return res.status(401).json({ message: 'Refresh token not found' });
+        const tokenInDb = await RefreshTokens.findOne({ refreshToken: incoming });
+        if (!tokenInDb) return res.status(401).json({ message: 'Refresh token not found or has been invalidated' });
 
         let decoded;
         try {
             decoded = jwt.verify(incoming, process.env.JWT_REFRESH_TOKEN_SECRET);
         } catch (err) {
-            return res.status(401).json({ message: 'Invalid refresh token' });
+            // If token is invalid, it might have been compromised. For security, remove it.
+            await RefreshTokens.deleteOne({ refreshToken: incoming });
+            return res.status(403).json({ message: 'Invalid or expired refresh token. Please log in again.' });
         }
 
-        const foundUser = await Users.findById(decoded.userId).exec();
-        if (!foundUser) return res.status(401).json({ message: 'Unauthorized' });
+        // CORRECT: Access the nested UserInfo object
+        const userIdFromToken = decoded.UserInfo?.userId;
+        if (!userIdFromToken) {
+            return res.status(403).json({ message: 'Token is malformed. Please log in again.' });
+        }
 
-        const { accessToken, refreshToken } = signTokenPair(decoded.userId, decoded.email, foundUser.roles);
+        const foundUser = await Users.findById(userIdFromToken).exec();
+        if (!foundUser) return res.status(401).json({ message: 'Unauthorized: User not found.' });
 
-        await upsertRefreshToken(decoded.userId, decoded.email, refreshToken);
+        // Use the centralized and consistent signTokenPair function
+        const { accessToken, refreshToken } = signTokenPair(foundUser._id, foundUser.email, foundUser.roles);
+
+        // Rotate the refresh token: update the existing one with the new one
+        await upsertRefreshToken(foundUser._id, foundUser.email, refreshToken);
 
         return res.status(200).json({ accessToken, refreshToken });
     } catch (err) {
