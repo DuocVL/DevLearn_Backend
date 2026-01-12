@@ -93,7 +93,7 @@ const handlerGetListProblems = async (req, res) => {
         const limitNum = parseInt(limit) || 20;
         const skip = (pageNum - 1) * limitNum;
 
-        const filter = { hidden: false };
+        const filter = { hidden: { $ne: true } }; // MODIFIED: Find all problems that are NOT explicitly hidden
         if (difficulty) filter.difficulty = difficulty;
         // find problems where tags array contains the tag
         if (tag) filter.tags = tag;
