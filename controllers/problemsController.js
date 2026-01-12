@@ -93,9 +93,8 @@ const handlerGetListProblems = async (req, res) => {
         const limitNum = parseInt(limit) || 20;
         const skip = (pageNum - 1) * limitNum;
 
-        const filter = { hidden: { $ne: true } }; // MODIFIED: Find all problems that are NOT explicitly hidden
+        const filter = { hidden: { $ne: true } };
         if (difficulty) filter.difficulty = difficulty;
-        // find problems where tags array contains the tag
         if (tag) filter.tags = tag;
 
         const total = await Problems.countDocuments(filter);
@@ -105,7 +104,6 @@ const handlerGetListProblems = async (req, res) => {
             .skip(skip)
             .limit(limitNum);
 
-        // Prepare summary objects for frontend; include solved/saved flags when available
         const user = req.user || null;
         const userSaved = (user && Array.isArray(user.savedProblems)) ? user.savedProblems.map(String) : [];
 
@@ -115,7 +113,7 @@ const handlerGetListProblems = async (req, res) => {
                 title: p.title,
                 difficulty: p.difficulty || 'Unknown',
                 acceptance: (p.acceptance != null) ? p.acceptance : 0,
-                solved: false, // solving state requires separate tracking; default false
+                solved: false, 
                 saved: user ? userSaved.includes(String(p._id)) : false,
             };
         });
@@ -134,10 +132,38 @@ const handlerGetListProblems = async (req, res) => {
     }
 };
 
+const handlerGetProblemById = async (req, res) => {
+    try {
+        const { problemId } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(problemId)) {
+            return res.status(400).json({ message: "Invalid Problem ID" });
+        }
+
+        const problem = await Problems.findById(problemId);
+
+        if (!problem || problem.hidden === true) {
+            return res.status(404).json({ message: "Problem not found" });
+        }
+
+        return res.status(200).json({ data: problem });
+
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
 
 //TODO tìm kiếm theo từ khóa
 const handlerSearchProblems = async (req, res) => {
 
 };
 
-module.exports = { handlerCreateProblems, handlerUpdateProblems, handlerDeleteProblems, handlerGetListProblems, handlerSearchProblems };
+module.exports = { 
+    handlerCreateProblems, 
+    handlerUpdateProblems, 
+    handlerDeleteProblems, 
+    handlerGetListProblems, 
+    handlerGetProblemById,
+    handlerSearchProblems 
+};
