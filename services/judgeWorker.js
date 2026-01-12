@@ -151,18 +151,21 @@ async function processSubmission(submissionId) {
       if (memoryKB > maxMemory) maxMemory = memoryKB;
 
       if (execResult.timedOut) {
-        await updateSubmission(sub._id, userId, { status: 'Time Limit Exceeded', runtime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length } });
+        // FIX: Use totalRuntime instead of runtime
+        await updateSubmission(sub._id, userId, { status: 'Time Limit Exceeded', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length } });
         return;
       }
 
       if (memoryKB > MEMORY_LIMIT_KB) {
-        await updateSubmission(sub._id, userId, { status: 'Memory Limit Exceeded', runtime, memory: Math.round(memoryKB / 1024), result: { passedCount, totalCount: testcases.length } });
+        // FIX: Use totalRuntime instead of runtime
+        await updateSubmission(sub._id, userId, { status: 'Memory Limit Exceeded', runtime: totalRuntime, memory: Math.round(memoryKB / 1024), result: { passedCount, totalCount: testcases.length } });
         return;
       }
 
       if (execResult.code !== 0) {
         const stderr = await fs.readFile(path.join(tmpdir, errorFile), 'utf8').catch(() => 'Runtime Error');
-        await updateSubmission(sub._id, userId, { status: 'Runtime Error', runtime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length, error: stderr } });
+        // FIX: Use totalRuntime instead of runtime
+        await updateSubmission(sub._id, userId, { status: 'Runtime Error', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length, error: stderr } });
         return;
       }
       
