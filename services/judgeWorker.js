@@ -8,213 +8,130 @@ const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
 const { redisWorkerClient } = require('../config/redis');
 const { getLanguageConfig } = require('../config/languageConfig');
-const socketService = require('./socketService');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
-const COMPILE_TIMEOUT_MS = 10000;
-const EXECUTE_TIMEOUT_MS = 3000;
-const MEMORY_LIMIT_KB = 256 * 1024;
-const USER_CODE_PLACEHOLDER = '//{{USER_CODE}}';
 
-async function updateSubmission(submissionId, userId, updateData) {
-    const submission = await Submissions.findByIdAndUpdate(submissionId, { $set: updateData }, { new: true });
-    if (submission) {
-        const eventType = 'submission_update';
-        console.log(`Notifying user ${userId} about ${eventType}: ${submission.status}`);
-        socketService.sendToUser(userId.toString(), { type: eventType, payload: submission.toObject() });
-    }
-    return submission;
-}
+/**
+ * A very simple function to run code in a Docker container.
+ * It returns the stdout of the executed command.
+ */
+async function runInDocker(image, code, language, input) {
+    const langConfig = getLanguageConfig(language);
+    if (!langConfig) throw new Error(`Language ${language} not configured.`);
 
-async function runInDocker(image, hostDir, commandString, timeout) {
-  return new Promise((resolve) => {
-    const containerDir = '/usr/src/app';
-    const resolvedHostDir = path.resolve(hostDir);
-    const dockerArgs = [
-      'run', '-i', '--rm', '--network=none',
-      `--memory=${Math.floor(MEMORY_LIMIT_KB / 1024)}m`, '--cpus=1',
-      '-v', `${resolvedHostDir}:${containerDir}`,
-      '-w', containerDir, image,
-      'sh', '-c', commandString
-    ];
-    const proc = spawn('docker', dockerArgs);
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try { proc.kill('SIGKILL'); } catch (e) { /* ignore */ }
-    }, timeout);
-    proc.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal, timedOut }); });
-    proc.on('error', (err) => { clearTimeout(timer); resolve({ code: 1, signal: null, timedOut: false, internalError: true, stderr: err.message }); });
-  });
-}
+    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step1-'));
+    const sourceFilePath = path.join(tmpdir, langConfig.srcFileName);
+    await fs.writeFile(sourceFilePath, code);
 
-function parseTimeOutput(timeOutput) {
-    const memoryMatch = timeOutput.match(/Maximum resident set size \(kbytes\): (\d+)/);
-    const timeMatch = timeOutput.match(/User time \(seconds\): ([\d.]+)/);
-    const memoryKB = memoryMatch ? parseInt(memoryMatch[1], 10) : 0;
-    const timeSec = timeMatch ? parseFloat(timeMatch[1]) : 0;
-    return { memoryKB, timeMs: timeSec * 1000 };
+    // Command to execute inside Docker.
+    // We use `echo` to pipe the input to the script.
+    // The input is escaped to handle single quotes.
+    const command = `echo -n '${input.replace(/'/g, `'\''`)}' | ${langConfig.runCmd.cmd} ${langConfig.runCmd.args.join(' ')}`;
+
+    return new Promise((resolve, reject) => {
+        const dockerArgs = [
+            'run', '--rm', '-i', '--network=none', '--cpus=1',
+            '-v', `${tmpdir}:${langConfig.containerDir}`,
+            '-w', langConfig.containerDir,
+            image,
+            'sh', '-c', command
+        ];
+
+        const proc = spawn('docker', dockerArgs);
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', (data) => { stdout += data.toString(); });
+        proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+        proc.on('close', (code) => {
+            fs.rm(tmpdir, { recursive: true, force: true }).catch(err => console.error(`Failed to cleanup tmpdir: ${tmpdir}`, err));
+            if (code === 0) {
+                resolve(stdout);
+            } else {
+                reject(new Error(`Docker execution failed with code ${code}. Stderr: ${stderr}`));
+            }
+        });
+
+        proc.on('error', (err) => {
+            fs.rm(tmpdir, { recursive: true, force: true }).catch(err => console.error(`Failed to cleanup tmpdir: ${tmpdir}`, err));
+            reject(err);
+        });
+    });
 }
 
 async function processSubmission(submissionId) {
-  if (!mongoose.Types.ObjectId.isValid(submissionId)) {
-    console.error(`Invalid submissionId: ${submissionId}`);
-    return;
-  }
-
-  let sub = await Submissions.findById(submissionId);
-  if (!sub) { return; }
-
-  const userId = sub.userId;
-  await updateSubmission(sub._id, userId, { status: 'Running', result: { passedCount: 0, totalCount: 0 } });
-
-  const [problem, langConfig] = await Promise.all([
-      Problems.findById(sub.problemId).lean(),
-      getLanguageConfig(sub.language)
-  ]);
-
-  if (!problem || !langConfig) {
-    await updateSubmission(sub._id, userId, { status: 'Runtime Error', result: { error: 'Problem or Language not found.' } });
-    return;
-  }
-
-  // --- LEETCODE-STYLE TEMPLATING LOGIC ---
-  const codeTemplate = problem.codeTemplates?.find(t => t.language === sub.language);
-  let finalCode = sub.code;
-  if (codeTemplate) {
-      if (!codeTemplate.template.includes(USER_CODE_PLACEHOLDER)) {
-          await updateSubmission(sub._id, userId, { status: 'Runtime Error', result: { error: `Problem Misconfiguration: Code template for ${sub.language} is missing placeholder.` } });
-          return;
-      }
-      
-      let generatedCode = codeTemplate.template.replace(USER_CODE_PLACEHOLDER, sub.code);
-
-      // --- HOT-PATCH for silent `except: pass` blocks in Python templates ---
-      if (sub.language === 'python') {
-          const badPattern = /except Exception as e:\s*pass/g;
-          const patch = 'except Exception as e:\n        import sys, traceback\n        traceback.print_exc(file=sys.stderr)\n        raise';
-          generatedCode = generatedCode.replace(badPattern, patch);
-      }
-      // --- END HOT-PATCH ---
-      
-      finalCode = generatedCode;
-  }
-  // --- END OF TEMPLATING LOGIC ---
-  
-  const tmpdir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'judge-'));
-
-  try {
-    await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), finalCode);
-
-    if (langConfig.compileCmd) {
-      await updateSubmission(sub._id, userId, { status: 'Compiling' });
-      const compileScript = `#!/bin/sh\nset -e\n${langConfig.compileCmd.cmd} ${langConfig.compileCmd.args.join(' ')} > /dev/null 2> error.log`;
-      await fs.writeFile(path.join(tmpdir, 'compile.sh'), compileScript);
-      const compResult = await runInDocker(langConfig.image, tmpdir, 'chmod +x compile.sh && ./compile.sh', COMPILE_TIMEOUT_MS);
-
-      if (compResult.code !== 0) {
-        const stderr = await fs.readFile(path.join(tmpdir, 'error.log'), 'utf8').catch(() => 'Compilation Failed');
-        await updateSubmission(sub._id, userId, { status: 'Compilation Error', result: { error: stderr } });
-        return;
-      }
-    }
-
-    const testcases = problem.testcases || [];
-    let passedCount = 0, totalRuntime = 0, maxMemory = 0;
-
-    for (let i = 0; i < testcases.length; i++) {
-      const t = testcases[i];
-      await updateSubmission(sub._id, userId, { status: 'Running', result: { passedCount, totalCount: testcases.length } });
-
-      const inputFile = 'input.txt', outputFile = 'output.txt', errorFile = 'error.log', timeFile = 'time.log';
-      await fs.writeFile(path.join(tmpdir, inputFile), t.input || '');
-      
-      const runCommand = `${langConfig.runCmd.cmd} ${langConfig.runCmd.args.join(' ')}`;
-      const runnerScript = `#!/bin/sh\nset -e\n/usr/bin/time -v -o ${timeFile} ${runCommand} < ${inputFile} > ${outputFile} 2> ${errorFile}`;
-      await fs.writeFile(path.join(tmpdir, 'run.sh'), runnerScript);
-      
-      const execResult = await runInDocker(langConfig.image, tmpdir, 'chmod +x run.sh && ./run.sh', EXECUTE_TIMEOUT_MS);
-
-      const timeLog = await fs.readFile(path.join(tmpdir, timeFile), 'utf8').catch(() => '');
-      const { memoryKB, timeMs } = parseTimeOutput(timeLog);
-      totalRuntime += timeMs; if (memoryKB > maxMemory) maxMemory = memoryKB;
-
-      if (execResult.timedOut) {
-        await updateSubmission(sub._id, userId, { status: 'Time Limit Exceeded', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length } });
-        return;
-      }
-      if (memoryKB > MEMORY_LIMIT_KB) {
-        await updateSubmission(sub._id, userId, { status: 'Memory Limit Exceeded', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length } });
-        return;
-      }
-      if (execResult.code !== 0) {
-        const stderr = await fs.readFile(path.join(tmpdir, errorFile), 'utf8').catch(() => 'Runtime Error without stderr');
-        await updateSubmission(sub._id, userId, { status: 'Runtime Error', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length, error: stderr } });
-        return;
-      }
-      
-      const userOutput = await fs.readFile(path.join(tmpdir, outputFile), 'utf8').catch(() => '');
-      const actualOutput = userOutput.trim(), expectedOutput = (t.output || '').trim();
-
-      if (actualOutput === expectedOutput) {
-        passedCount++;
-      } else {
-        await updateSubmission(sub._id, userId, { status: 'Wrong Answer', runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length, failedTestcases: { input: t.isHidden ? 'Hidden' : t.input, expectedOutput: t.isHidden ? 'Hidden' : expectedOutput, userOutput: actualOutput } } });
-        return;
-      }
-    }
-
-    const finalStatus = (passedCount === testcases.length) ? 'Accepted' : 'Wrong Answer';
-    await updateSubmission(sub._id, userId, { status: finalStatus, runtime: totalRuntime, memory: Math.round(maxMemory / 1024), result: { passedCount, totalCount: testcases.length }});
+    console.log(`[Step 1] Processing submission: ${submissionId}`);
     
-    await Problems.findByIdAndUpdate(sub.problemId, { $inc: { totalSubmissions: 1, ...(finalStatus === 'Accepted' && { acceptedSubmissions: 1 }) } });
+    const submission = await Submissions.findById(submissionId);
+    if (!submission) {
+        console.error(`[Step 1] Submission ${submissionId} not found.`);
+        return;
+    }
 
-  } catch (err) {
-    console.error(`Critical error processing submission ${submissionId}:`, err);
-    await updateSubmission(submissionId, userId, { status: 'Runtime Error', result: { error: 'An internal judge error occurred.' } }).catch(e => console.error('Failed to update status after critical error:', e));
-  } finally {
-    fsSync.rmSync(tmpdir, { recursive: true, force: true });
-  }
+    const problem = await Problems.findById(submission.problemId).lean();
+    if (!problem || !problem.testcases || problem.testcases.length === 0) {
+        console.error(`[Step 1] Problem or testcases not found for submission ${submissionId}.`);
+        return;
+    }
+
+    const userCode = submission.code;
+    const language = submission.language;
+    const firstTestcase = problem.testcases[0];
+    const langConfig = getLanguageConfig(language);
+
+    console.log(`[Step 1] Language: ${language}, Image: ${langConfig.image}`);
+    console.log(`[Step 1] Testcase Input:`, firstTestcase.input);
+
+    try {
+        const output = await runInDocker(langConfig.image, userCode, language, firstTestcase.input);
+        
+        console.log('-------------------------------------------');
+        console.log('           CODE EXECUTION RESULT           ');
+        console.log('-------------------------------------------');
+        console.log(`Submission ID:   ${submissionId}`);
+        console.log(`Expected Output:   ${firstTestcase.output}`);
+        console.log(`Actual Output:     ${output.trim()}`);
+        console.log('-------------------------------------------');
+
+        // For now, we just mark it as 'Completed' to signify the worker has finished.
+        await Submissions.findByIdAndUpdate(submissionId, { $set: { status: 'Completed' } });
+
+    } catch (error) {
+        console.error(`[Step 1] An error occurred while processing submission ${submissionId}:`, error);
+        await Submissions.findByIdAndUpdate(submissionId, { $set: { status: 'Error' } });
+    }
 }
 
 // --- Worker Lifecycle ---
-
 let isStopping = false;
 
 async function startWorker() {
-  console.log('Judge worker started. Waiting for submissions.');
-  while (!isStopping) {
-    try {
-      const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
-      if (result && !isStopping) {
-        const submissionId = result.element;
-        console.log(`Processing submission: ${submissionId}`);
-        processSubmission(submissionId).catch(err => {
-            console.error(`Unhandled exception in processSubmission for ${submissionId}:`, err);
-        });
-      }
-    } catch (err) {
-      if (isStopping || (err.message && err.message.includes('Connection is closed'))) {
-        console.log('Redis connection closed, stopping worker loop.');
-        break;
-      }
-      console.error('Worker loop error:', err);
-      if (!isStopping) {
-        await new Promise(resolve => setTimeout(resolve, 5000));
-      }
+    console.log('Judge worker (Step 1: Simple Execution) started. Waiting for submissions.');
+    while (!isStopping) {
+        try {
+            const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
+            if (result && !isStopping) {
+                processSubmission(result.element).catch(err => {
+                    console.error(`Unhandled exception in processSubmission for ${result.element}:`, err);
+                });
+            }
+        } catch (err) { 
+            if (isStopping) break;
+            console.error('Worker loop error:', err);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
     }
-  }
-  console.log('Judge worker stopped.');
+    console.log('Judge worker stopped.');
 }
 
 function stopWorker() {
-  if (!isStopping) {
-    console.log('Stopping judge worker...');
-    isStopping = true;
-    if (redisWorkerClient.isOpen) {
-        redisWorkerClient.disconnect().catch(err => console.error('Error disconnecting redis for worker shutdown', err));
+    if (!isStopping) {
+        isStopping = true;
+        if (redisWorkerClient.isOpen) {
+            redisWorkerClient.disconnect().catch(err => console.error('Error disconnecting redis for worker shutdown', err));
+        }
     }
-  }
 }
 
 process.on('SIGTERM', stopWorker);
