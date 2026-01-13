@@ -11,57 +11,17 @@ const { getLanguageConfig } = require('../config/languageConfig');
 const SUBMISSION_QUEUE = 'submissionQueue';
 
 /**
- * Manages the entire Docker-based code execution process, including compilation and running.
- * @returns {object} An object containing the final result: { status, stdout, stderr, executionTime }
- */
-async function runInDocker(image, code, language, input, timeLimit) {
-    const langConfig = getLanguageConfig(language);
-    if (!langConfig) throw new Error(`Language ${language} not configured.`);
-
-    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step3-'));
-    const sourceFilePath = path.join(tmpdir, langConfig.srcFileName);
-    await fs.writeFile(sourceFilePath, code);
-
-    let compileResult = { success: true, stderr: '' };
-
-    // 1. Compilation Step (if necessary)
-    if (langConfig.compileCmd) {
-        console.log(`[Step 3] Compiling source for ${language}...`);
-        compileResult = await executeCommand(image, langConfig.compileCmd, tmpdir, langConfig.containerDir);
-        if (!compileResult.success) {
-            await fs.rm(tmpdir, { recursive: true, force: true });
-            return { status: 'Compilation Error', stdout: '', stderr: compileResult.stderr };
-        }
-    }
-
-    // 2. Execution Step (with timeout)
-    const runCommandWithTimeout = {
-        cmd: 'timeout',
-        args: [`${timeLimit}s`, langConfig.runCmd.cmd, ...langConfig.runCmd.args]
-    };
-
-    const runResult = await executeCommand(image, runCommandWithTimeout, tmpdir, langConfig.containerDir, input);
-
-    // 3. Cleanup
-    await fs.rm(tmpdir, { recursive: true, force: true });
-
-    // 4. Determine final status
-    if (!runResult.success) {
-        if (runResult.exitCode === 124) { // `timeout` command exit code for TLE
-            return { status: 'Time Limit Exceeded', stdout: '', stderr: '' };
-        }
-        return { status: 'Runtime Error', stdout: '', stderr: runResult.stderr };
-    }
-    
-    return { status: 'Success', stdout: runResult.stdout, stderr: runResult.stderr };
-}
-
-/**
  * A generic utility to execute a command in a Docker container.
- * @returns {object} { success: boolean, stdout: string, stderr: string, exitCode: number }
+ * Returns a promise that resolves to { success, stdout, stderr, exitCode }.
  */
-function executeCommand(image, commandConfig, tmpdir, containerDir, input = null) {
-    const command = `${commandConfig.cmd} ${commandConfig.args.join(' ')}`;
+function executeCommand(image, commandConfig, tmpdir, containerDir, timeLimit = 30, input = null) {
+    // For compilation, timeLimit is longer; for execution, it's controlled by the problem's time limit.
+    const commandWithTimeout = {
+        cmd: 'timeout',
+        args: [`${timeLimit}s`, commandConfig.cmd, ...commandConfig.args]
+    };
+    
+    const command = `${commandWithTimeout.cmd} ${commandWithTimeout.args.join(' ')}`;
     const fullShellCommand = input ? `echo -n '${input.replace(/'/g, `'\''`)}' | ${command}` : command;
 
     return new Promise((resolve) => {
@@ -95,75 +55,99 @@ async function updateSubmission(submissionId, updateData) {
     await Submissions.findByIdAndUpdate(submissionId, { $set: updateData });
 }
 
+// --- STEP 4: Refactored Submission Processing ---
 async function processSubmission(submissionId) {
-    console.log(`[Step 3] Processing submission: ${submissionId}`);
     const submission = await Submissions.findById(submissionId);
     if (!submission) {
-        console.error(`[Step 3] Submission ${submissionId} not found.`);
+        console.error(`[Step 4] Submission ${submissionId} not found.`);
         return;
     }
-
-    await updateSubmission(submissionId, { status: 'Running' });
 
     const problem = await Problems.findById(submission.problemId).lean();
     if (!problem) {
-        await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: 'Problem not found.' } });
-        return;
+        return await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: 'Problem not found.' } });
     }
+    
+    await updateSubmission(submissionId, { status: 'Running' });
 
     const langConfig = getLanguageConfig(submission.language);
-    const timeLimit = problem.timeLimit || 2; // Use problem's time limit, fallback to 2s
+    const problemTimeLimit = problem.timeLimit || 2;
+    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step4-'));
 
-    // Run all testcases
-    let passedCount = 0;
-    for (let i = 0; i < problem.testcases.length; i++) {
-        const tc = problem.testcases[i];
-        console.log(`[Step 3] Running testcase ${i + 1}/${problem.testcases.length}...`);
+    try {
+        // Write source code to temp directory
+        await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), submission.code);
 
-        const executionResult = await runInDocker(langConfig.image, submission.code, submission.language, tc.input, timeLimit);
-
-        if (executionResult.status !== 'Success') {
-             await updateSubmission(submissionId, {
-                status: executionResult.status,
-                result: { error: executionResult.stderr.slice(0, 1000) } // Truncate long error messages
-            });
-            return; // Stop on first failure (CE, TLE, RE)
+        // 1. COMPILE ONCE (if needed)
+        if (langConfig.compileCmd) {
+            console.log(`[Step 4] Compiling source for ${submission.language}...`);
+            // Use a longer, fixed timeout for compilation (e.g., 30s)
+            const compileResult = await executeCommand(langConfig.image, langConfig.compileCmd, tmpdir, langConfig.containerDir, 30);
+            
+            if (!compileResult.success) {
+                console.log(`[Step 4] Compilation Failed.`);
+                return await updateSubmission(submissionId, {
+                    status: 'Compilation Error',
+                    result: { error: compileResult.stderr.slice(0, 1000) }
+                });
+            }
         }
 
-        const trimmedOutput = executionResult.stdout.trim();
-        const expectedOutput = tc.output.trim();
+        // 2. EXECUTE FOR EACH TESTCASE
+        let passedCount = 0;
+        for (let i = 0; i < problem.testcases.length; i++) {
+            const tc = problem.testcases[i];
+            console.log(`[Step 4] Running testcase ${i + 1}/${problem.testcases.length}...`);
 
-        if (trimmedOutput !== expectedOutput) {
-            console.log(`[Step 3] Wrong Answer on testcase ${i + 1}.`);
-            await updateSubmission(submissionId, {
-                status: 'Wrong Answer',
-                result: {
-                    passedCount,
-                    totalCount: problem.testcases.length,
-                    failedTestcase: {
-                        input: tc.isHidden ? 'Hidden' : tc.input,
-                        expectedOutput: tc.isHidden ? 'Hidden' : expectedOutput,
-                        userOutput: trimmedOutput,
+            const runResult = await executeCommand(langConfig.image, langConfig.runCmd, tmpdir, langConfig.containerDir, problemTimeLimit, tc.input);
+
+            if (runResult.exitCode === 124) { // TLE
+                return await updateSubmission(submissionId, { status: 'Time Limit Exceeded' });
+            }
+            if (!runResult.success) { // Runtime Error
+                return await updateSubmission(submissionId, {
+                    status: 'Runtime Error',
+                    result: { error: runResult.stderr.slice(0, 1000) }
+                });
+            }
+
+            const trimmedOutput = runResult.stdout.trim();
+            const expectedOutput = tc.output.trim();
+
+            if (trimmedOutput !== expectedOutput) {
+                return await updateSubmission(submissionId, {
+                    status: 'Wrong Answer',
+                    result: {
+                        passedCount,
+                        totalCount: problem.testcases.length,
+                        failedTestcase: { input: tc.isHidden ? 'Hidden' : tc.input, expectedOutput: tc.isHidden ? 'Hidden' : expectedOutput, userOutput: trimmedOutput }
                     }
-                }
-            });
-            return;
+                });
+            }
+            passedCount++;
         }
-        passedCount++;
-    }
 
-    console.log(`[Step 3] All ${problem.testcases.length} testcases passed! Submission Accepted.`);
-    await updateSubmission(submissionId, {
-        status: 'Accepted',
-        result: { passedCount, totalCount: problem.testcases.length }
-    });
+        // All testcases passed
+        await updateSubmission(submissionId, {
+            status: 'Accepted',
+            result: { passedCount, totalCount: problem.testcases.length }
+        });
+
+    } catch (error) {
+        console.error(`[Step 4] An unexpected error occurred for submission ${submissionId}:`, error);
+        await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: 'An unexpected judge error occurred.' } });
+    } finally {
+        // Cleanup the temp directory
+        await fs.rm(tmpdir, { recursive: true, force: true });
+    }
 }
+
 
 // --- Worker Lifecycle ---
 let isStopping = false;
 
 async function startWorker() {
-    console.log('Judge worker (Step 3: Full Logic + TLE/CE) started. Waiting for submissions.');
+    console.log('Judge worker (Step 4: Optimized - Compile Once) started. Waiting for submissions.');
     while (!isStopping) {
         try {
             const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
@@ -172,7 +156,7 @@ async function startWorker() {
                     console.error(`Unhandled exception in processSubmission for ${result.element}:`, err);
                 });
             }
-        } catch (err) { 
+        } catch (err) {
             if (isStopping) break;
             console.error('Worker loop error:', err);
             await new Promise(resolve => setTimeout(resolve, 5000));
