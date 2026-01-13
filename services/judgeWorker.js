@@ -16,16 +16,23 @@ const TEMPLATE_PLACEHOLDER = 'USER_CODE_PLACEHOLDER';
  * @returns {Promise<object>} { success, stdout, stderr, exitCode, runtime, memory }
  */
 async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLimit, input = null, measureResources = false) {
-    let cmdToRun = [commandConfig.cmd, ...commandConfig.args];
+    // 1. Define the core user command
+    const userCommand = `${commandConfig.cmd} ${commandConfig.args.join(' ')}`;
 
+    // 2. Wrap the user command with timeout. This is the process we want to measure.
+    const userCommandWithTimeout = `timeout ${timeLimit}s ${userCommand}`;
+
+    // 3. Conditionally wrap the whole thing with the `time` utility for measurement.
+    // `time` will measure `timeout`, which is correct. If `timeout` kills the user code,
+    // `time` still reports how long `timeout` was running.
+    let commandToExecute = userCommandWithTimeout;
     if (measureResources) {
-        // The format string for /usr/bin/time MUST be single-quoted for the shell.
-        cmdToRun.unshift("time", "-f", "'%e;%M'");
+        // Using /usr/bin/time to be explicit. The format string MUST be single-quoted for the shell.
+        commandToExecute = `/usr/bin/time -f '%e;%M' ${userCommandWithTimeout}`;
     }
 
-    cmdToRun.unshift("timeout", `${timeLimit}s`);
-    
-    const fullShellCommand = input ? `echo -n '${input.replace(/'/g, `'\''`)}' | ${cmdToRun.join(' ')}` : cmdToRun.join(' ');
+    // 4. Construct the full shell command for docker, with input piping if necessary.
+    const fullShellCommand = input ? `echo -n '${input.replace(/'/g, `'\''`)}' | ${commandToExecute}` : commandToExecute;
 
     return new Promise((resolve) => {
         const dockerArgs = [
@@ -48,6 +55,8 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
             let memory = 0;
             let finalStderr = stderr;
 
+            // Exit code 124 means `timeout` killed the process.
+            // We still want to parse the metrics in this case.
             if (measureResources) {
                 try {
                     const resourceUsage = stderr.split('\n').pop()?.trim() || '';
@@ -58,13 +67,24 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
                     if (!isNaN(timeInSeconds) && !isNaN(memInKb)) {
                         runtime = Math.round(timeInSeconds * 1000); // seconds to ms
                         memory = memInKb;
+                        // Clean the stderr to remove the time measurement line for user-facing errors.
                         const lastNewline = stderr.lastIndexOf('\n');
-                        finalStderr = lastNewline > -1 ? stderr.substring(0, lastNewline) : '';
+                        finalStderr = lastNewline > -1 ? stderr.substring(0, lastNewline).trim() : '';
                     }
-                } catch (e) { /* Parsing failed, leave resources as 0 */ }
+                } catch (e) {
+                    // Parsing failed, which means the time command didn't output as expected.
+                    // Leave resources as 0, but keep the original stderr for debugging.
+                }
             }
             
-            resolve({ success: exitCode === 0, stdout, stderr: finalStderr, exitCode, runtime, memory });
+            // For TLE, the success status is false
+            const success = exitCode === 0;
+            if (exitCode === 124) {
+                 // Override the success status for TLE, but keep the parsed metrics.
+                 return resolve({ success: false, stdout, stderr: 'Time Limit Exceeded', exitCode, runtime, memory });
+            }
+
+            resolve({ success, stdout, stderr: finalStderr, exitCode, runtime, memory });
         });
 
         proc.on('error', (err) => {
@@ -103,7 +123,7 @@ async function processSubmission(submissionId) {
 
         if (langConfig.compileCmd) {
             console.log(`[New Arch] Compiling for ${submission.language}...`);
-            const compileResult = await executeCommand(langConfig.image, langConfig.compileCmd, tmpdir, langConfig.containerDir, 30, null, false); // No measurement for compile
+            const compileResult = await executeCommand(langConfig.image, langConfig.compileCmd, tmpdir, langConfig.containerDir, 30, null, false);
 
             if (!compileResult.success) {
                 return await updateSubmission(submissionId, { status: 'Compilation Error', result: { error: compileResult.stderr.slice(0, 1000) } });
@@ -123,10 +143,10 @@ async function processSubmission(submissionId) {
             maxRuntime = Math.max(maxRuntime, runResult.runtime);
             maxMemory = Math.max(maxMemory, runResult.memory);
 
-            if (runResult.exitCode === 124) {
-                return await updateSubmission(submissionId, { status: 'Time Limit Exceeded', runtime: maxRuntime, memory: maxMemory });
-            }
             if (!runResult.success) {
+                 if (runResult.exitCode === 124) {
+                    return await updateSubmission(submissionId, { status: 'Time Limit Exceeded', runtime: maxRuntime, memory: maxMemory });
+                 }
                 return await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: runResult.stderr.slice(0, 1000) }, runtime: maxRuntime, memory: maxMemory });
             }
 
