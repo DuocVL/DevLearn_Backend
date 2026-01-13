@@ -1,42 +1,43 @@
 const mongoose = require('mongoose');
 
-const submissionsSchema = new mongoose.Schema({
-
-    problemId: {type: mongoose.Schema.Types.ObjectId, ref: 'Problems', required: true},
-    userId: {type: mongoose.Schema.Types.ObjectId, ref: 'Users', required: true},
-    language: { type: String, required: true , enum:['cpp', 'python', 'javascript', 'java'] }, // vd: cpp, python, java
-    code: { type: String, required: true },
-
-    // Trạng thái chấm bài
+const submissionSchema = new mongoose.Schema({
+    problemId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Problem',
+        required: true,
+    },
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true,
+    },
+    language: {
+        type: String,
+        required: true,
+    },
+    code: {
+        type: String,
+        required: true,
+    },
     status: {
         type: String,
-        enum: [
-            'Pending',
-            'Accepted',
-            'Running',
-            'Wrong Answer',
-            'Time Limit Exceeded',
-            'Runtime Error',
-            'Memory Limit Exceeded',
-            'Compilation Error'
-        ],
-        default: 'Pending'
+        default: 'Pending', // Pending, Running, Accepted, Wrong Answer, Runtime Error, Time Limit Exceeded
     },
     // Thông tin chi tiết về kết quả chạy
     result: {
         passedCount: { type: Number, default: 0 },
         totalCount: { type: Number, default: 0 },
-        failedTestcases: {
+        failedTestcase: { // <<< SỬA TẠI ĐÂY: từ số nhiều thành số ít
             input: String,
             expectedOutput: String,
             userOutput: String,
-        }
+        },
+        error: String, // Để lưu thông điệp lỗi của Runtime Error
     },
 
     // Thống kê
     runtime: { type: Number, default: 0 }, // tổng thời gian chạy (ms)
-    memory: { type: Number, default: 0 },  // bộ nhớ tiêu thụ (MB)
-    }, { timestamps: true }
-);
+    memory: { type: Number, default: 0 }, // bộ nhớ sử dụng (KB)
+}, { timestamps: true });
 
-module.exports = mongoose.model('Submissions', submissionsSchema);
+module.exports = mongoose.model('Submission', submissionSchema);
