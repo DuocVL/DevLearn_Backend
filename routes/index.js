@@ -12,5 +12,6 @@ router.use('/reactions', require('./reactions'));
 router.use('/problems', require('./problems'));
 router.use('/submissions', require('./submissions'));
 router.use('/users', require('./users'));
+router.use('/lessons', require('./lessons')); // <-- ADD LESSONS ROUTE
 
 module.exports = router;
