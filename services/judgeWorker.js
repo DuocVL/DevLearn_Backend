@@ -12,6 +12,37 @@ const SUBMISSION_QUEUE = 'submissionQueue';
 const TEMPLATE_PLACEHOLDER = 'USER_CODE_PLACEHOLDER';
 
 /**
+ * Parses the verbose output of busybox `time -v`.
+ * @returns {{runtime: number, memory: number}} Runtime in ms, Memory in KB.
+ */
+function parseBusyboxTime(stderr) {
+    let runtime = 0;
+    let memory = 0;
+
+    try {
+        const timeMatch = stderr.match(/Elapsed \(wall clock\) time \(h:mm:ss or m:ss\): (.*)/);
+        if (timeMatch && timeMatch[1]) {
+            const timeParts = timeMatch[1].split(':').reverse(); // [ss, mm, hh]
+            const seconds = parseFloat(timeParts[0]);
+            const minutes = timeParts[1] ? parseInt(timeParts[1], 10) : 0;
+            const hours = timeParts[2] ? parseInt(timeParts[2], 10) : 0;
+            if (!isNaN(seconds)) {
+                runtime = Math.round((hours * 3600 + minutes * 60 + seconds) * 1000);
+            }
+        }
+
+        const memMatch = stderr.match(/Maximum resident set size \(kbytes\): (\d+)/);
+        if (memMatch && memMatch[1]) {
+            memory = parseInt(memMatch[1], 10);
+        }
+    } catch (e) {
+        console.error("Error parsing busybox time output:", e);
+    }
+
+    return { runtime, memory };
+}
+
+/**
  * Executes a command in a Docker container, with optional resource measurement.
  * @returns {Promise<object>} { success, stdout, stderr, exitCode, runtime, memory }
  */
@@ -19,9 +50,8 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
     let cmdToRun = `${commandConfig.cmd} ${commandConfig.args.join(' ')}`;
 
     if (measureResources) {
-        // IMPORTANT: The format string for /usr/bin/time MUST be single-quoted for the shell.
-        const timeCmd = `/usr/bin/time -f '%e;%M'`;
-        cmdToRun = `${timeCmd} ${cmdToRun}`;
+        // Use the `time -v` command from busybox, which is available in Alpine.
+        cmdToRun = `time -v ${cmdToRun}`;
     }
 
     const timeoutCmd = `timeout ${timeLimit}s ${cmdToRun}`;
@@ -46,24 +76,17 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
         proc.on('close', (exitCode) => {
             let runtime = 0;
             let memory = 0;
+            let finalStderr = stderr;
 
-            if (measureResources && (exitCode === 0 || exitCode === 124)) { // Also parse on TLE
-                try {
-                    const resourceUsage = stderr.split('\n').pop()?.trim() || '';
-                    const [timeStr, memStr] = resourceUsage.split(';');
-                    const timeInSeconds = parseFloat(timeStr);
-                    const memInKb = parseInt(memStr, 10);
-                    if (!isNaN(timeInSeconds) && !isNaN(memInKb)) {
-                        runtime = Math.round(timeInSeconds * 1000); // seconds to ms
-                        memory = memInKb; // in KB
-                        // Clean stderr by removing the resource usage line
-                        const lastNewline = stderr.lastIndexOf('\n');
-                        stderr = lastNewline > -1 ? stderr.substring(0, lastNewline) : '';
-                    }
-                } catch (e) { /* Parsing failed, leave resources as 0 */ }
+            if (measureResources) {
+                const resources = parseBusyboxTime(stderr);
+                runtime = resources.runtime;
+                memory = resources.memory;
+                // Clean stderr to remove the time command's output for user-facing errors
+                finalStderr = stderr.split('Command being timed')[0]?.trim() || '';
             }
             
-            resolve({ success: exitCode === 0, stdout, stderr, exitCode, runtime, memory });
+            resolve({ success: exitCode === 0, stdout, stderr: finalStderr, exitCode, runtime, memory });
         });
 
         proc.on('error', (err) => {
@@ -77,7 +100,7 @@ async function updateSubmission(submissionId, updateData) {
     await Submissions.findByIdAndUpdate(submissionId, { $set: updateData });
 }
 
-// --- STEP 6 (FIX): Resource Measurement ---
+// --- STEP 6 (FINAL FIX): Resource Measurement ---
 async function processSubmission(submissionId) {
     const submission = await Submissions.findById(submissionId);
     if (!submission) return;
@@ -89,7 +112,7 @@ async function processSubmission(submissionId) {
 
     const langConfig = getLanguageConfig(submission.language);
     const problemTimeLimit = problem.timeLimit || 2;
-    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step6-fix-'));
+    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step6-final-'));
 
     try {
         let finalCode = submission.code;
@@ -101,7 +124,7 @@ async function processSubmission(submissionId) {
         await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), finalCode);
 
         if (langConfig.compileCmd) {
-            console.log(`[Step 6 FIX] Compiling for ${submission.language}...`);
+            console.log(`[Step 6 FINAL] Compiling for ${submission.language}...`);
             const compileResult = await executeCommand(langConfig.image, langConfig.compileCmd, tmpdir, langConfig.containerDir, 30, null, false); // No measurement for compile
 
             if (!compileResult.success) {
@@ -115,15 +138,14 @@ async function processSubmission(submissionId) {
 
         for (let i = 0; i < problem.testcases.length; i++) {
             const tc = problem.testcases[i];
-            console.log(`[Step 6 FIX] Running testcase ${i + 1}/${problem.testcases.length}...`);
+            console.log(`[Step 6 FINAL] Running testcase ${i + 1}/${problem.testcases.length}...`);
 
-            // Measure resources for run command
             const runResult = await executeCommand(langConfig.image, langConfig.runCmd, tmpdir, langConfig.containerDir, problemTimeLimit, tc.input, true);
 
             maxRuntime = Math.max(maxRuntime, runResult.runtime);
             maxMemory = Math.max(maxMemory, runResult.memory);
 
-            if (runResult.exitCode === 124) { // TLE
+            if (runResult.exitCode === 124) {
                 return await updateSubmission(submissionId, { status: 'Time Limit Exceeded', runtime: maxRuntime, memory: maxMemory });
             }
             if (!runResult.success) {
@@ -145,7 +167,7 @@ async function processSubmission(submissionId) {
         await updateSubmission(submissionId, { status: 'Accepted', runtime: maxRuntime, memory: maxMemory, result: { passedCount, totalCount: problem.testcases.length } });
 
     } catch (error) {
-        console.error(`[Step 6 FIX] Unexpected error for submission ${submissionId}:`, error);
+        console.error(`[Step 6 FINAL] Unexpected error for submission ${submissionId}:`, error);
         await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: 'An unexpected judge error occurred.' } });
     } finally {
         await fs.rm(tmpdir, { recursive: true, force: true });
@@ -157,7 +179,7 @@ async function processSubmission(submissionId) {
 let isStopping = false;
 
 async function startWorker() {
-    console.log('Judge worker (Step 6 FIX: Resource Measurement) started.');
+    console.log('Judge worker (Step 6 FINAL FIX: Resource Measurement) started.');
     while (!isStopping) {
         try {
             const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
