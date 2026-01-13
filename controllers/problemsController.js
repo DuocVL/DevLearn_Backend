@@ -104,19 +104,23 @@ const handlerGetListProblems = async (req, res) => {
             .skip(skip)
             .limit(limitNum);
 
+        // *** BẮT ĐẦU THAY ĐỔI ***
         const user = req.user || null;
         const userSaved = (user && Array.isArray(user.savedProblems)) ? user.savedProblems.map(String) : [];
+        const userSolved = (user && Array.isArray(user.solvedProblems)) ? user.solvedProblems.map(String) : []; // Lấy danh sách ID bài đã giải
 
         const summaries = problems.map((p) => {
+            const problemIdStr = String(p._id);
             return {
                 id: p._id,
                 title: p.title,
                 difficulty: p.difficulty || 'Unknown',
                 acceptance: (p.acceptance != null) ? p.acceptance : 0,
-                solved: false, 
-                saved: user ? userSaved.includes(String(p._id)) : false,
+                solved: user ? userSolved.includes(problemIdStr) : false, // Kiểm tra xem bài này đã giải chưa
+                saved: user ? userSaved.includes(problemIdStr) : false,
             };
         });
+        // *** KẾT THÚC THAY ĐỔI ***
 
         return res.status(200).json({
             data: summaries,
