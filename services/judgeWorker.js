@@ -11,36 +11,41 @@ const { getLanguageConfig } = require('../config/languageConfig');
 const SUBMISSION_QUEUE = 'submissionQueue';
 const TEMPLATE_PLACEHOLDER = 'USER_CODE_PLACEHOLDER';
 
-/**
- * Executes a command in a Docker container, with optional resource measurement via GNU time.
- * @returns {Promise<object>} { success, stdout, stderr, exitCode, runtime, memory }
- */
+// --- DEEP DIVE FIX: Using file redirection instead of pipes ---
 async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLimit, input = null, measureResources = false) {
-    // 1. Define the core user command
-    const userCommand = `${commandConfig.cmd} ${commandConfig.args.join(' ')}`;
+    const stdinFileName = 'stdin.txt';
+    let userCommand = `${commandConfig.cmd} ${commandConfig.args.join(' ')}`;
 
-    // 2. Wrap the user command with timeout. This is the process we want to measure.
-    const userCommandWithTimeout = `timeout ${timeLimit}s ${userCommand}`;
-
-    // 3. Conditionally wrap the whole thing with the `time` utility for measurement.
-    // `time` will measure `timeout`, which is correct. If `timeout` kills the user code,
-    // `time` still reports how long `timeout` was running.
-    let commandToExecute = userCommandWithTimeout;
-    if (measureResources) {
-        // Using /usr/bin/time to be explicit. The format string MUST be single-quoted for the shell.
-        commandToExecute = `/usr/bin/time -f '%e;%M' ${userCommandWithTimeout}`;
+    // 1. If there's input, write it to a file and prepare for redirection.
+    if (input !== null) {
+        try {
+            await fs.writeFile(path.join(tmpdir, stdinFileName), input);
+            userCommand = `${userCommand} < ${stdinFileName}`;
+        } catch (e) {
+            console.error("[DEBUG] Failed to write stdin file:", e);
+            return { success: false, stdout: '', stderr: 'Judge Error: Failed to write input file.', exitCode: -1, runtime: 0, memory: 0 };
+        }
     }
 
-    // 4. Construct the full shell command for docker, with input piping if necessary.
-    const fullShellCommand = input ? `echo -n '${input.replace(/'/g, `'\''`)}' | ${commandToExecute}` : commandToExecute;
+    // 2. Wrap the user command with timeout.
+    const commandWithTimeout = `timeout ${timeLimit}s ${userCommand}`;
+
+    // 3. Conditionally wrap the whole thing with `/usr/bin/time`.
+    let commandToExecute = commandWithTimeout;
+    if (measureResources) {
+        commandToExecute = `/usr/bin/time -f '%e;%M' ${commandWithTimeout}`;
+    }
+
+    console.log(`[DEBUG LOG] Final command for shell: "${commandToExecute}"`);
 
     return new Promise((resolve) => {
         const dockerArgs = [
-            'run', '--rm', '-i', '--network=none', '--cpus=1', '-m', '256m', // Hard memory limit
+            'run', '--rm', // '-i' is no longer needed as we don't use stdin pipe
+            '--network=none', '--cpus=1', '-m', '256m', 
             '-v', `${tmpdir}:${containerDir}`,
             '-w', containerDir,
             image,
-            'sh', '-c', fullShellCommand
+            'sh', '-c', commandToExecute
         ];
 
         const proc = spawn('docker', dockerArgs);
@@ -51,44 +56,45 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
         proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
         proc.on('close', (exitCode) => {
+            console.log(`[DEBUG LOG] Exit Code: ${exitCode}`);
+            console.log(`[DEBUG LOG] Raw STDOUT:\n---\n${stdout}\n---`);
+            console.log(`[DEBUG LOG] Raw STDERR:\n---\n${stderr}\n---`);
+
             let runtime = 0;
             let memory = 0;
-            let finalStderr = stderr;
+            let finalStderr = stderr.trim();
 
-            // Exit code 124 means `timeout` killed the process.
-            // We still want to parse the metrics in this case.
             if (measureResources) {
                 try {
                     const resourceUsage = stderr.split('\n').pop()?.trim() || '';
+                    console.log(`[DEBUG LOG] Extracted resource string: "${resourceUsage}"`);
+
                     const [timeStr, memStr] = resourceUsage.split(';');
                     const timeInSeconds = parseFloat(timeStr);
                     const memInKb = parseInt(memStr, 10);
+                    console.log(`[DEBUG LOG] Parsed time(s): ${timeInSeconds}, Parsed mem(kb): ${memInKb}`);
 
                     if (!isNaN(timeInSeconds) && !isNaN(memInKb)) {
-                        runtime = Math.round(timeInSeconds * 1000); // seconds to ms
+                        runtime = Math.round(timeInSeconds * 1000);
                         memory = memInKb;
-                        // Clean the stderr to remove the time measurement line for user-facing errors.
                         const lastNewline = stderr.lastIndexOf('\n');
                         finalStderr = lastNewline > -1 ? stderr.substring(0, lastNewline).trim() : '';
                     }
                 } catch (e) {
-                    // Parsing failed, which means the time command didn't output as expected.
-                    // Leave resources as 0, but keep the original stderr for debugging.
+                     console.error('[DEBUG LOG] Error parsing resource string:', e);
                 }
             }
-            
-            // For TLE, the success status is false
-            const success = exitCode === 0;
+            console.log(`[DEBUG LOG] Final values: runtime=${runtime}ms, memory=${memory}kb`);
+
             if (exitCode === 124) {
-                 // Override the success status for TLE, but keep the parsed metrics.
-                 return resolve({ success: false, stdout, stderr: 'Time Limit Exceeded', exitCode, runtime, memory });
+                return resolve({ success: false, stdout, stderr: 'Time Limit Exceeded', exitCode, runtime, memory });
             }
 
-            resolve({ success, stdout, stderr: finalStderr, exitCode, runtime, memory });
+            resolve({ success: exitCode === 0, stdout, stderr: finalStderr, exitCode, runtime, memory });
         });
 
         proc.on('error', (err) => {
-            console.error("Spawn error:", err);
+            console.error("[DEBUG LOG] Spawn error:", err);
             resolve({ success: false, stdout: '', stderr: err.message, exitCode: -1, runtime: 0, memory: 0 });
         });
     });
@@ -98,7 +104,6 @@ async function updateSubmission(submissionId, updateData) {
     await Submissions.findByIdAndUpdate(submissionId, { $set: updateData });
 }
 
-// --- NEW ARCHITECTURE: Custom Docker Env ---
 async function processSubmission(submissionId) {
     const submission = await Submissions.findById(submissionId);
     if (!submission) return;
@@ -110,7 +115,7 @@ async function processSubmission(submissionId) {
 
     const langConfig = getLanguageConfig(submission.language);
     const problemTimeLimit = problem.timeLimit || 2;
-    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-new-arch-'));
+    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-final-fix-'));
 
     try {
         let finalCode = submission.code;
@@ -126,7 +131,7 @@ async function processSubmission(submissionId) {
             const compileResult = await executeCommand(langConfig.image, langConfig.compileCmd, tmpdir, langConfig.containerDir, 30, null, false);
 
             if (!compileResult.success) {
-                return await updateSubmission(submissionId, { status: 'Compilation Error', result: { error: compileResult.stderr.slice(0, 1000) } });
+                return await updateSubmission(submissionId, { status: 'Compilation Error', result: { error: compileResult.stderr } });
             }
         }
 
@@ -147,7 +152,7 @@ async function processSubmission(submissionId) {
                  if (runResult.exitCode === 124) {
                     return await updateSubmission(submissionId, { status: 'Time Limit Exceeded', runtime: maxRuntime, memory: maxMemory });
                  }
-                return await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: runResult.stderr.slice(0, 1000) }, runtime: maxRuntime, memory: maxMemory });
+                return await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: runResult.stderr }, runtime: maxRuntime, memory: maxMemory });
             }
 
             const trimmedOutput = runResult.stdout.trim();
@@ -176,7 +181,7 @@ async function processSubmission(submissionId) {
 let isStopping = false;
 
 async function startWorker() {
-    console.log('Judge worker (New Architecture: Custom Env) started.');
+    console.log('Judge worker (Deep Dive Fix) started.');
     while (!isStopping) {
         try {
             const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
