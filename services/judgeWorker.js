@@ -5,13 +5,14 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const Submissions = require('../models/Submissions');
 const Problems = require('../models/Problems');
+const User = require('../models/User'); // <-- IMPORT USER MODEL
 const { redisWorkerClient } = require('../config/redis');
 const { getLanguageConfig } = require('../config/languageConfig');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
 const TEMPLATE_PLACEHOLDER = 'USER_CODE_PLACEHOLDER';
 
-// --- FINAL FIX: Correctly parsing stderr ---
+// ... (Hàm executeCommand không thay đổi) ...
 async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLimit, input = null, measureResources = false) {
     const stdinFileName = 'stdin.txt';
     let userCommand = `${commandConfig.cmd} ${commandConfig.args.join(' ')}`;
@@ -21,7 +22,6 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
             await fs.writeFile(path.join(tmpdir, stdinFileName), input);
             userCommand = `${userCommand} < ${stdinFileName}`;
         } catch (e) {
-            console.error("[DEBUG] Failed to write stdin file:", e);
             return { success: false, stdout: '', stderr: 'Judge Error: Failed to write input file.', exitCode: -1, runtime: 0, memory: 0 };
         }
     }
@@ -32,8 +32,6 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
     if (measureResources) {
         commandToExecute = `/usr/bin/time -f '%e;%M' ${commandWithTimeout}`;
     }
-
-    console.log(`[DEBUG LOG] Final command for shell: "${commandToExecute}"`);
 
     return new Promise((resolve) => {
         const dockerArgs = [
@@ -53,25 +51,16 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
         proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
         proc.on('close', (exitCode) => {
-            console.log(`[DEBUG LOG] Exit Code: ${exitCode}`);
-            console.log(`[DEBUG LOG] Raw STDOUT:\n---\n${stdout}\n---`);
-            console.log(`[DEBUG LOG] Raw STDERR:\n---\n${stderr}\n---`);
-
             let runtime = 0;
             let memory = 0;
             let finalStderr = stderr.trim();
 
             if (measureResources) {
                 try {
-                    // **THE FIX IS HERE**: Trim the stderr string *before* splitting and popping.
-                    // This handles trailing newlines correctly.
                     const resourceUsage = stderr.trim().split('\n').pop()?.trim() || '';
-                    console.log(`[DEBUG LOG] Extracted resource string: "${resourceUsage}"`);
-
                     const [timeStr, memStr] = resourceUsage.split(';');
                     const timeInSeconds = parseFloat(timeStr);
                     const memInKb = parseInt(memStr, 10);
-                    console.log(`[DEBUG LOG] Parsed time(s): ${timeInSeconds}, Parsed mem(kb): ${memInKb}`);
 
                     if (!isNaN(timeInSeconds) && !isNaN(memInKb)) {
                         runtime = Math.round(timeInSeconds * 1000);
@@ -79,11 +68,8 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
                         const lastNewline = stderr.lastIndexOf('\n');
                         finalStderr = lastNewline > -1 ? stderr.substring(0, lastNewline).trim() : '';
                     }
-                } catch (e) {
-                     console.error('[DEBUG LOG] Error parsing resource string:', e);
-                }
+                } catch (e) { /* Ignore parsing errors */ }
             }
-            console.log(`[DEBUG LOG] Final values: runtime=${runtime}ms, memory=${memory}kb`);
 
             if (exitCode === 124) {
                 return resolve({ success: false, stdout, stderr: 'Time Limit Exceeded', exitCode, runtime, memory });
@@ -93,16 +79,17 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
         });
 
         proc.on('error', (err) => {
-            console.error("[DEBUG LOG] Spawn error:", err);
             resolve({ success: false, stdout: '', stderr: err.message, exitCode: -1, runtime: 0, memory: 0 });
         });
     });
 }
 
+
 async function updateSubmission(submissionId, updateData) {
     await Submissions.findByIdAndUpdate(submissionId, { $set: updateData });
 }
 
+// Cập nhật hàm processSubmission
 async function processSubmission(submissionId) {
     const submission = await Submissions.findById(submissionId);
     if (!submission) return;
@@ -126,9 +113,7 @@ async function processSubmission(submissionId) {
         await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), finalCode);
 
         if (langConfig.compileCmd) {
-            console.log(`[New Arch] Compiling for ${submission.language}...`);
             const compileResult = await executeCommand(langConfig.image, langConfig.compileCmd, tmpdir, langConfig.containerDir, 30, null, false);
-
             if (!compileResult.success) {
                 return await updateSubmission(submissionId, { status: 'Compilation Error', result: { error: compileResult.stderr } });
             }
@@ -140,8 +125,6 @@ async function processSubmission(submissionId) {
 
         for (let i = 0; i < problem.testcases.length; i++) {
             const tc = problem.testcases[i];
-            console.log(`[New Arch] Running testcase ${i + 1}/${problem.testcases.length}...`);
-
             const runResult = await executeCommand(langConfig.image, langConfig.runCmd, tmpdir, langConfig.containerDir, problemTimeLimit, tc.input, true);
 
             maxRuntime = Math.max(maxRuntime, runResult.runtime);
@@ -166,21 +149,31 @@ async function processSubmission(submissionId) {
             passedCount++;
         }
 
+        // *** BẮT ĐẦU THAY ĐỔI ***
         await updateSubmission(submissionId, { status: 'Accepted', runtime: maxRuntime, memory: maxMemory, result: { passedCount, totalCount: problem.testcases.length } });
+        
+        // Cập nhật lại User model, thêm problemId vào mảng solvedProblems
+        if (submission.userId) {
+            await User.findByIdAndUpdate(submission.userId, {
+                $addToSet: { solvedProblems: submission.problemId } // $addToSet để tránh trùng lặp
+            });
+        }
+        // *** KẾT THÚC THAY ĐỔI ***
 
     } catch (error) {
-        console.error(`[New Arch] Unexpected error for submission ${submissionId}:`, error);
+        console.error(`[Solved Feature] Unexpected error for submission ${submissionId}:`, error);
         await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: 'An unexpected judge error occurred.' } });
     } finally {
         await fs.rm(tmpdir, { recursive: true, force: true });
     }
 }
 
-// --- Worker Lifecycle ---
+
+// ... (Worker Lifecycle không thay đổi) ...
 let isStopping = false;
 
 async function startWorker() {
-    console.log('Judge worker (FINAL FIX) started.');
+    console.log('Judge worker (with Solved Feature) started.');
     while (!isStopping) {
         try {
             const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);

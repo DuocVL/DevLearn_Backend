@@ -11,6 +11,7 @@ const userSchema = new mongoose.Schema({
     roles: { type: String, enum:["user", "admin"] , default: 'user'},//quyền
     savedTutorials: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Tutorials'}],//Danh sách các khóa học,
     savedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problems' }],//Danh sách các vấn đề đã lưu,
+    solvedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problems' }], // <-- THÊM TRƯỜNG NÀY
     savedPosts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Posts' }], //Danh sách các bài viết đã lưu,
 
     //Dùng cho reset password
