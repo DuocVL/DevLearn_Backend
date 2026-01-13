@@ -60,9 +60,12 @@ const handlerUpdateComment = async (req, res) => {
         const comment = await Comments.findById(commentId);
         if(!comment) return res.status(404).json({ message: "Comment not found" });
 
-        if(!comment.userId.equals(req.user._id)) return res.status(403).json({ message: "Forbidden: Not your comment" });
+        // CHO PHÉP ADMIN HOẶC CHỦ SỞ HỮU
+        if(!comment.userId.equals(req.user._id) && req.user.roles !== 'admin') {
+            return res.status(403).json({ message: "Forbidden: You do not have permission to update this comment" });
+        }
 
-        if(comment.isDeleted) return res.status(400).json({ message: "Comment deleted"});
+        if(comment.isDeleted) return res.status(400).json({ message: "Cannot update a deleted comment"});
 
         const commentNew = await Comments.findByIdAndUpdate(
             commentId,
@@ -87,26 +90,53 @@ const handlerDeleteComment = async (req, res) => {
 
         const comment = await Comments.findById(commentId);
         if(!comment) return res.status(404).json({ message: "Comment not found" });
+        if(comment.isDeleted) return res.status(400).json({ message: "Comment already deleted" });
 
-        if(!comment.userId.equals(req.user._id)) return res.status(403).json({ message: "Forbidden: Not your comment" });
+        // CHO PHÉP ADMIN HOẶC CHỦ SỞ HỮU
+        if(!comment.userId.equals(req.user._id) && req.user.roles !== 'admin') {
+             return res.status(403).json({ message: "Forbidden: You do not have permission to delete this comment" });
+        }
 
+        // Giảm commentCount trên target cha (Post, Problem...)
         await updateCollection(comment.targetId, comment.targetType, -1);
         
+        // NẾU LÀ REPLY, GIẢM REPLYCOUNT TRÊN COMMENT CHA
+        if(comment.parentCommentId){
+            await Comments.updateOne({ _id: comment.parentCommentId }, { $inc: {replyCount: -1}});
+        }
+
         await Comments.findByIdAndUpdate(
             commentId,
             {
-                content: "comment đã xóa",
+                content: "This comment has been deleted.",
                 isDeleted: true,
+                anonymous: false, // Xóa trạng thái ẩn danh khi đã xóa
+                userId: null // Xóa liên kết đến user
             }
         );
 
-        return res.status(200).json({ message: "Comment deleted" });
+        return res.status(200).json({ message: "Comment deleted successfully" });
     } catch (err) {
         console.error(err);
         return res.status(500).json({ message: "Internal server error" });
     }
 };
 
+// Xử lý ẩn danh cho bình luận
+const sanitizeComments = (comments) => {
+    return comments.map(comment => {
+        if (comment.anonymous) {
+            // Thay thế thông tin user thật bằng thông tin ẩn danh
+            comment.userId = {
+                _id: null,
+                username: 'Anonymous',
+                avatar: '' // URL tới avatar mặc định
+            };
+        }
+        delete comment.anonymous; // Xóa trường anonymous khỏi output
+        return comment;
+    });
+}
 
 //Lấy danh sách comment
 const handlerGetListComment = async (req, res) => {
@@ -114,26 +144,20 @@ const handlerGetListComment = async (req, res) => {
         const { targetId, targetType } = req.params;
         if(!targetId || !targetType) return res.status(400).json({ message: "Missing required fields" });
     
-        if(!mongoose.Types.ObjectId.isValid(targetId)) return res.status(400).json({ message: "Invalid parentCommentId" });
+        if(!mongoose.Types.ObjectId.isValid(targetId)) return res.status(400).json({ message: "Invalid targetId" });
     
         const { page = 1,limit = 20  } = req.query;
         const skip = (parseInt(page) - 1) * parseInt(limit);
-        const total = await Comments.countDocuments({
+
+        const query = {
             targetId,
             targetType,
-            isDeleted: false,
-            hidden: false
-        });
- 
-        const listcomment = await Comments.find(
-            { 
-                targetId: targetId,
-                targetType: targetType,
-                isDeleted: false,
-                hidden: false,
+            parentCommentId: null, // Chỉ lấy comment gốc
+        };
 
-            }
-        )
+        const total = await Comments.countDocuments(query);
+ 
+        let listcomment = await Comments.find(query)
         .populate({
             path: "userId",
             select: "username avatar",
@@ -144,7 +168,7 @@ const handlerGetListComment = async (req, res) => {
         .lean();
 
         return res.status(200).json({
-            data: listcomment ,
+            data: sanitizeComments(listcomment),
             pagination: {
                 currentPage: parseInt(page),
                 totalPages: Math.ceil(total / limit),
@@ -165,28 +189,20 @@ const handlerGetReply = async (req, res) => {
     
         if(!mongoose.Types.ObjectId.isValid(parentCommentId)) return res.status(400).json({ message: "Invalid parentCommentId" });
     
-        const { page = 1,limit = 20  } = req.query;
+        const { page = 1,limit = 10 } = req.query; // Giới hạn ít hơn cho reply
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        const replies = await Comments.find(
-            { 
-                parentCommentId: parentCommentId ,
-                isDeleted: false,
-                hidden: false,
-
-            }
-        )
+        let replies = await Comments.find({ parentCommentId: parentCommentId })
         .populate({
             path: "userId",
             select: "username avatar",
-            
         })
-        .sort({ createdAt: -1})
+        .sort({ createdAt: 1}) // Sắp xếp từ cũ đến mới cho reply
         .skip(skip)
         .limit(parseInt(limit))
         .lean();
 
-        return res.status(200).json({ data: replies });
+        return res.status(200).json({ data: sanitizeComments(replies) });
     } catch (err) {
         console.error(err);
         return res.status(500).json({ message: "Internal server error" });

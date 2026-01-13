@@ -12,6 +12,7 @@ router.use('/reactions', require('./reactions'));
 router.use('/problems', require('./problems'));
 router.use('/submissions', require('./submissions'));
 router.use('/users', require('./users'));
-router.use('/lessons', require('./lessons')); // <-- ADD LESSONS ROUTE
+router.use('/lessons', require('./lessons'));
+router.use('/progress', require('./progress')); // <-- ADD PROGRESS ROUTE
 
 module.exports = router;
