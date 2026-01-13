@@ -11,21 +11,15 @@ const { getLanguageConfig } = require('../config/languageConfig');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
 
-/**
- * A very simple function to run code in a Docker container.
- * It returns the stdout of the executed command.
- */
+// The runInDocker function remains the same as in Step 1.
 async function runInDocker(image, code, language, input) {
     const langConfig = getLanguageConfig(language);
     if (!langConfig) throw new Error(`Language ${language} not configured.`);
 
-    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step1-'));
+    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step2-'));
     const sourceFilePath = path.join(tmpdir, langConfig.srcFileName);
     await fs.writeFile(sourceFilePath, code);
 
-    // Command to execute inside Docker.
-    // We use `echo` to pipe the input to the script.
-    // The input is escaped to handle single quotes.
     const command = `echo -n '${input.replace(/'/g, `'\''`)}' | ${langConfig.runCmd.cmd} ${langConfig.runCmd.args.join(' ')}`;
 
     return new Promise((resolve, reject) => {
@@ -49,7 +43,7 @@ async function runInDocker(image, code, language, input) {
             if (code === 0) {
                 resolve(stdout);
             } else {
-                reject(new Error(`Docker execution failed with code ${code}. Stderr: ${stderr}`));
+                reject(new Error(`Execution failed with code ${code}. Stderr: ${stderr}`));
             }
         });
 
@@ -60,54 +54,92 @@ async function runInDocker(image, code, language, input) {
     });
 }
 
+// Helper to update submission status in the database.
+async function updateSubmission(submissionId, updateData) {
+    await Submissions.findByIdAndUpdate(submissionId, { $set: updateData });
+}
+
 async function processSubmission(submissionId) {
-    console.log(`[Step 1] Processing submission: ${submissionId}`);
-    
-    const submission = await Submissions.findById(submissionId);
+    console.log(`[Step 2] Processing submission: ${submissionId}`);
+    let submission = await Submissions.findById(submissionId);
     if (!submission) {
-        console.error(`[Step 1] Submission ${submissionId} not found.`);
+        console.error(`[Step 2] Submission ${submissionId} not found.`);
         return;
     }
+
+    await updateSubmission(submissionId, { status: 'Running' });
 
     const problem = await Problems.findById(submission.problemId).lean();
     if (!problem || !problem.testcases || problem.testcases.length === 0) {
-        console.error(`[Step 1] Problem or testcases not found for submission ${submissionId}.`);
+        await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: 'Problem or testcases not found.' } });
         return;
     }
 
-    const userCode = submission.code;
-    const language = submission.language;
-    const firstTestcase = problem.testcases[0];
-    const langConfig = getLanguageConfig(language);
+    const langConfig = getLanguageConfig(submission.language);
+    const testcases = problem.testcases;
+    let passedCount = 0;
 
-    console.log(`[Step 1] Language: ${language}, Image: ${langConfig.image}`);
-    console.log(`[Step 1] Testcase Input:`, firstTestcase.input);
-
-    try {
-        const output = await runInDocker(langConfig.image, userCode, language, firstTestcase.input);
+    for (let i = 0; i < testcases.length; i++) {
+        const tc = testcases[i];
+        console.log(`[Step 2] Running testcase ${i + 1}/${testcases.length}...`);
         
-        console.log('-------------------------------------------');
-        console.log('           CODE EXECUTION RESULT           ');
-        console.log('-------------------------------------------');
-        console.log(`Submission ID:   ${submissionId}`);
-        console.log(`Expected Output:   ${firstTestcase.output}`);
-        console.log(`Actual Output:     ${output.trim()}`);
-        console.log('-------------------------------------------');
+        await updateSubmission(submissionId, { 
+            result: { passedCount: passedCount, totalCount: testcases.length }
+        });
 
-        // For now, we just mark it as 'Completed' to signify the worker has finished.
-        await Submissions.findByIdAndUpdate(submissionId, { $set: { status: 'Completed' } });
+        try {
+            const actualOutput = await runInDocker(langConfig.image, submission.code, submission.language, tc.input);
+            const trimmedOutput = actualOutput.trim();
+            const expectedOutput = tc.output.trim();
 
-    } catch (error) {
-        console.error(`[Step 1] An error occurred while processing submission ${submissionId}:`, error);
-        await Submissions.findByIdAndUpdate(submissionId, { $set: { status: 'Error' } });
+            if (trimmedOutput !== expectedOutput) {
+                console.log(`[Step 2] Wrong Answer on testcase ${i + 1}.`);
+                await updateSubmission(submissionId, {
+                    status: 'Wrong Answer',
+                    result: {
+                        passedCount,
+                        totalCount: testcases.length,
+                        failedTestcase: {
+                            input: tc.isHidden ? 'Hidden' : tc.input,
+                            expectedOutput: tc.isHidden ? 'Hidden' : expectedOutput,
+                            userOutput: trimmedOutput,
+                        }
+                    }
+                });
+                return; // Stop processing
+            }
+
+            passedCount++;
+
+        } catch (error) {
+            console.error(`[Step 2] Runtime Error on testcase ${i + 1}:`, error.message);
+            await updateSubmission(submissionId, {
+                status: 'Runtime Error',
+                result: {
+                    passedCount,
+                    totalCount: testcases.length,
+                    error: error.message
+                }
+            });
+            return; // Stop processing
+        }
     }
+
+    console.log(`[Step 2] All ${testcases.length} testcases passed! Submission Accepted.`);
+    await updateSubmission(submissionId, {
+        status: 'Accepted',
+        result: {
+            passedCount,
+            totalCount: testcases.length
+        }
+    });
 }
 
-// --- Worker Lifecycle ---
+// --- Worker Lifecycle (Updated log message) ---
 let isStopping = false;
 
 async function startWorker() {
-    console.log('Judge worker (Step 1: Simple Execution) started. Waiting for submissions.');
+    console.log('Judge worker (Step 2: Full Judging Logic) started. Waiting for submissions.');
     while (!isStopping) {
         try {
             const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
