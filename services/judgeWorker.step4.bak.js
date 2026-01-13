@@ -9,10 +9,13 @@ const { redisWorkerClient } = require('../config/redis');
 const { getLanguageConfig } = require('../config/languageConfig');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
-const TEMPLATE_PLACEHOLDER = '//{{USER_CODE}}';
 
-// executeCommand function remains the same as Step 4.
+/**
+ * A generic utility to execute a command in a Docker container.
+ * Returns a promise that resolves to { success, stdout, stderr, exitCode }.
+ */
 function executeCommand(image, commandConfig, tmpdir, containerDir, timeLimit = 30, input = null) {
+    // For compilation, timeLimit is longer; for execution, it's controlled by the problem's time limit.
     const commandWithTimeout = {
         cmd: 'timeout',
         args: [`${timeLimit}s`, commandConfig.cmd, ...commandConfig.args]
@@ -52,11 +55,11 @@ async function updateSubmission(submissionId, updateData) {
     await Submissions.findByIdAndUpdate(submissionId, { $set: updateData });
 }
 
-// --- STEP 5: Function-Based Problem Support ---
+// --- STEP 4: Refactored Submission Processing ---
 async function processSubmission(submissionId) {
     const submission = await Submissions.findById(submissionId);
     if (!submission) {
-        console.error(`[Step 5] Submission ${submissionId} not found.`);
+        console.error(`[Step 4] Submission ${submissionId} not found.`);
         return;
     }
 
@@ -69,28 +72,20 @@ async function processSubmission(submissionId) {
 
     const langConfig = getLanguageConfig(submission.language);
     const problemTimeLimit = problem.timeLimit || 2;
-    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step5-'));
+    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step4-'));
 
     try {
-        // --- TEMPLATE LOGIC ---
-        let finalCode = submission.code;
-        const codeTemplate = problem.codeTemplates?.find(t => t.language === submission.language);
+        // Write source code to temp directory
+        await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), submission.code);
 
-        if (codeTemplate && codeTemplate.template) {
-            console.log(`[Step 5] Found code template for ${submission.language}. Assembling final code.`);
-            finalCode = codeTemplate.template.replace(TEMPLATE_PLACEHOLDER, submission.code);
-        } else {
-            console.log(`[Step 5] No code template found for ${submission.language}. Running as a complete program.`);
-        }
-        // ---------------------
-
-        await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), finalCode);
-
+        // 1. COMPILE ONCE (if needed)
         if (langConfig.compileCmd) {
-            console.log(`[Step 5] Compiling source for ${submission.language}...`);
+            console.log(`[Step 4] Compiling source for ${submission.language}...`);
+            // Use a longer, fixed timeout for compilation (e.g., 30s)
             const compileResult = await executeCommand(langConfig.image, langConfig.compileCmd, tmpdir, langConfig.containerDir, 30);
             
             if (!compileResult.success) {
+                console.log(`[Step 4] Compilation Failed.`);
                 return await updateSubmission(submissionId, {
                     status: 'Compilation Error',
                     result: { error: compileResult.stderr.slice(0, 1000) }
@@ -98,10 +93,11 @@ async function processSubmission(submissionId) {
             }
         }
 
+        // 2. EXECUTE FOR EACH TESTCASE
         let passedCount = 0;
         for (let i = 0; i < problem.testcases.length; i++) {
             const tc = problem.testcases[i];
-            console.log(`[Step 5] Running testcase ${i + 1}/${problem.testcases.length}...`);
+            console.log(`[Step 4] Running testcase ${i + 1}/${problem.testcases.length}...`);
 
             const runResult = await executeCommand(langConfig.image, langConfig.runCmd, tmpdir, langConfig.containerDir, problemTimeLimit, tc.input);
 
@@ -131,24 +127,27 @@ async function processSubmission(submissionId) {
             passedCount++;
         }
 
+        // All testcases passed
         await updateSubmission(submissionId, {
             status: 'Accepted',
             result: { passedCount, totalCount: problem.testcases.length }
         });
 
     } catch (error) {
-        console.error(`[Step 5] An unexpected error occurred for submission ${submissionId}:`, error);
+        console.error(`[Step 4] An unexpected error occurred for submission ${submissionId}:`, error);
         await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: 'An unexpected judge error occurred.' } });
     } finally {
+        // Cleanup the temp directory
         await fs.rm(tmpdir, { recursive: true, force: true });
     }
 }
+
 
 // --- Worker Lifecycle ---
 let isStopping = false;
 
 async function startWorker() {
-    console.log('Judge worker (Step 5: Function-Based Problems) started. Waiting for submissions.');
+    console.log('Judge worker (Step 4: Optimized - Compile Once) started. Waiting for submissions.');
     while (!isStopping) {
         try {
             const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
