@@ -11,12 +11,11 @@ const { getLanguageConfig } = require('../config/languageConfig');
 const SUBMISSION_QUEUE = 'submissionQueue';
 const TEMPLATE_PLACEHOLDER = 'USER_CODE_PLACEHOLDER';
 
-// --- DEEP DIVE FIX: Using file redirection instead of pipes ---
+// --- FINAL FIX: Correctly parsing stderr ---
 async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLimit, input = null, measureResources = false) {
     const stdinFileName = 'stdin.txt';
     let userCommand = `${commandConfig.cmd} ${commandConfig.args.join(' ')}`;
 
-    // 1. If there's input, write it to a file and prepare for redirection.
     if (input !== null) {
         try {
             await fs.writeFile(path.join(tmpdir, stdinFileName), input);
@@ -27,10 +26,8 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
         }
     }
 
-    // 2. Wrap the user command with timeout.
     const commandWithTimeout = `timeout ${timeLimit}s ${userCommand}`;
 
-    // 3. Conditionally wrap the whole thing with `/usr/bin/time`.
     let commandToExecute = commandWithTimeout;
     if (measureResources) {
         commandToExecute = `/usr/bin/time -f '%e;%M' ${commandWithTimeout}`;
@@ -40,7 +37,7 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
 
     return new Promise((resolve) => {
         const dockerArgs = [
-            'run', '--rm', // '-i' is no longer needed as we don't use stdin pipe
+            'run', '--rm', 
             '--network=none', '--cpus=1', '-m', '256m', 
             '-v', `${tmpdir}:${containerDir}`,
             '-w', containerDir,
@@ -66,7 +63,9 @@ async function executeCommand(image, commandConfig, tmpdir, containerDir, timeLi
 
             if (measureResources) {
                 try {
-                    const resourceUsage = stderr.split('\n').pop()?.trim() || '';
+                    // **THE FIX IS HERE**: Trim the stderr string *before* splitting and popping.
+                    // This handles trailing newlines correctly.
+                    const resourceUsage = stderr.trim().split('\n').pop()?.trim() || '';
                     console.log(`[DEBUG LOG] Extracted resource string: "${resourceUsage}"`);
 
                     const [timeStr, memStr] = resourceUsage.split(';');
@@ -181,7 +180,7 @@ async function processSubmission(submissionId) {
 let isStopping = false;
 
 async function startWorker() {
-    console.log('Judge worker (Deep Dive Fix) started.');
+    console.log('Judge worker (FINAL FIX) started.');
     while (!isStopping) {
         try {
             const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
