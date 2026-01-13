@@ -9,7 +9,8 @@ const { redisWorkerClient } = require('../config/redis');
 const { getLanguageConfig } = require('../config/languageConfig');
 
 const SUBMISSION_QUEUE = 'submissionQueue';
-const TEMPLATE_PLACEHOLDER = '//{{USER_CODE}}';
+// CORRECTED: The placeholder is now language-agnostic.
+const TEMPLATE_PLACEHOLDER = 'USER_CODE_PLACEHOLDER';
 
 // executeCommand function remains the same as Step 4.
 function executeCommand(image, commandConfig, tmpdir, containerDir, timeLimit = 30, input = null) {
@@ -52,11 +53,11 @@ async function updateSubmission(submissionId, updateData) {
     await Submissions.findByIdAndUpdate(submissionId, { $set: updateData });
 }
 
-// --- STEP 5: Function-Based Problem Support ---
+// --- STEP 5 (FIXED): Function-Based Problem Support ---
 async function processSubmission(submissionId) {
     const submission = await Submissions.findById(submissionId);
     if (!submission) {
-        console.error(`[Step 5] Submission ${submissionId} not found.`);
+        console.error(`[Step 5 FIX] Submission ${submissionId} not found.`);
         return;
     }
 
@@ -69,25 +70,23 @@ async function processSubmission(submissionId) {
 
     const langConfig = getLanguageConfig(submission.language);
     const problemTimeLimit = problem.timeLimit || 2;
-    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step5-'));
+    const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'judge-step5-fix-'));
 
     try {
-        // --- TEMPLATE LOGIC ---
         let finalCode = submission.code;
         const codeTemplate = problem.codeTemplates?.find(t => t.language === submission.language);
 
         if (codeTemplate && codeTemplate.template) {
-            console.log(`[Step 5] Found code template for ${submission.language}. Assembling final code.`);
+            console.log(`[Step 5 FIX] Found code template for ${submission.language}. Assembling final code.`);
             finalCode = codeTemplate.template.replace(TEMPLATE_PLACEHOLDER, submission.code);
         } else {
-            console.log(`[Step 5] No code template found for ${submission.language}. Running as a complete program.`);
+            console.log(`[Step 5 FIX] No code template found. Running as a complete program.`);
         }
-        // ---------------------
 
         await fs.writeFile(path.join(tmpdir, langConfig.srcFileName), finalCode);
 
         if (langConfig.compileCmd) {
-            console.log(`[Step 5] Compiling source for ${submission.language}...`);
+            console.log(`[Step 5 FIX] Compiling source for ${submission.language}...`);
             const compileResult = await executeCommand(langConfig.image, langConfig.compileCmd, tmpdir, langConfig.containerDir, 30);
             
             if (!compileResult.success) {
@@ -101,7 +100,7 @@ async function processSubmission(submissionId) {
         let passedCount = 0;
         for (let i = 0; i < problem.testcases.length; i++) {
             const tc = problem.testcases[i];
-            console.log(`[Step 5] Running testcase ${i + 1}/${problem.testcases.length}...`);
+            console.log(`[Step 5 FIX] Running testcase ${i + 1}/${problem.testcases.length}...`);
 
             const runResult = await executeCommand(langConfig.image, langConfig.runCmd, tmpdir, langConfig.containerDir, problemTimeLimit, tc.input);
 
@@ -137,7 +136,7 @@ async function processSubmission(submissionId) {
         });
 
     } catch (error) {
-        console.error(`[Step 5] An unexpected error occurred for submission ${submissionId}:`, error);
+        console.error(`[Step 5 FIX] An unexpected error occurred for submission ${submissionId}:`, error);
         await updateSubmission(submissionId, { status: 'Runtime Error', result: { error: 'An unexpected judge error occurred.' } });
     } finally {
         await fs.rm(tmpdir, { recursive: true, force: true });
@@ -148,7 +147,7 @@ async function processSubmission(submissionId) {
 let isStopping = false;
 
 async function startWorker() {
-    console.log('Judge worker (Step 5: Function-Based Problems) started. Waiting for submissions.');
+    console.log('Judge worker (Step 5 FIX: Standardized Placeholder) started. Waiting for submissions.');
     while (!isStopping) {
         try {
             const result = await redisWorkerClient.brPop(SUBMISSION_QUEUE, 0);
