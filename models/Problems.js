@@ -22,6 +22,7 @@ const problemsSchema = new mongoose.Schema({
     difficulty: { type: String, enum: ['Easy', 'Medium', 'Hard'], required: true },
     tags: [String],
     testcases: [testcaseSchema],
+    timeLimit: { type: Number, default: 2 }, // Time limit in seconds. Default is 2s.
     
     // -- NEW: LeetCode-style templating fields --
     codeTemplates: [codeTemplateSchema],
