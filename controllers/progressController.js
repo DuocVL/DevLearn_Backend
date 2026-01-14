@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const Progress = require('../models/Progress');
 const Lessons = require('../models/Lessons');
+const User = require('../models/User');
 
 // @desc    Người dùng đánh dấu một lesson là đã hoàn thành
 // @route   POST /api/progress/lessons/:lessonId
@@ -8,24 +9,20 @@ const Lessons = require('../models/Lessons');
 const handlerMarkLessonAsComplete = async (req, res) => {
     try {
         const { lessonId } = req.params;
-        const userId = req.user.id; // Lấy từ middleware verifyJWT
+        const userId = req.user.id;
 
         if (!mongoose.Types.ObjectId.isValid(lessonId)) {
             return res.status(400).json({ message: "Invalid Lesson ID" });
         }
 
-        // Kiểm tra xem lesson có tồn tại không
         const lesson = await Lessons.findById(lessonId);
         if (!lesson) {
             return res.status(404).json({ message: "Lesson not found" });
         }
 
-        // Tìm hoặc tạo mới document progress cho user
         const progress = await Progress.findOneAndUpdate(
             { userId: userId },
-            // Thêm lessonId vào mảng completedLessons, $addToSet để đảm bảo không có giá trị trùng lặp
             { $addToSet: { completedLessons: lessonId } },
-            // Options: { new: true } trả về document đã cập nhật, { upsert: true } tạo mới nếu không tìm thấy
             { new: true, upsert: true }
         );
 
@@ -40,4 +37,31 @@ const handlerMarkLessonAsComplete = async (req, res) => {
     }
 };
 
-module.exports = { handlerMarkLessonAsComplete };
+// @desc    Lấy toàn bộ tiến trình của người dùng đang đăng nhập
+// @route   GET /api/progress
+// @access  Private
+const handlerGetMyProgress = async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        // Lấy tiến trình học tập từ model Progress
+        const learningProgress = await Progress.findOne({ userId: userId }).lean();
+
+        // Lấy thông tin các bài tập đã giải từ model User
+        // Chúng ta đã có req.user từ middleware, không cần query lại nếu không cần thiết
+        const solvedProblems = req.user.solvedProblems || [];
+
+        const response = {
+            completedLessons: learningProgress ? learningProgress.completedLessons : [],
+            completedProblems: solvedProblems
+        };
+
+        return res.status(200).json({ data: response });
+
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+module.exports = { handlerMarkLessonAsComplete, handlerGetMyProgress };

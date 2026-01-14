@@ -5,6 +5,6 @@ const { getMyProfile } = require('../controllers/userController');
 // @route   GET /users/profile
 // @desc    Get current user's profile
 // @access  Private
-router.get('/profile', getMyProfile); // Apply middleware here
+router.get('/profile', getMyProfile);
 
 module.exports = router;

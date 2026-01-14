@@ -5,105 +5,108 @@ const Problems = require('../models/Problems');
 const Lessons = require('../models/Lessons');
 const Comments = require('../models/Comments');
 
+// Map để liên kết targetType với Model tương ứng
+const modelMap = {
+    posts: Posts,
+    problems: Problems,
+    lessons: Lessons,
+    comments: Comments,
+};
 
-const map = {
-        posts: Posts,
-        problems: Problems,
-        lessons: Lessons,
-        comments: Comments,
-    };
+// Hàm tiện ích để cập nhật likeCount/unlikeCount trên document gốc
+async function updateTargetCounts(targetType, targetId, reaction, amount) {
+    const Model = modelMap[targetType];
+    if (!Model) throw new Error('Invalid targetType');
 
-async function updateCollection(targetId, targetType, reaction, number){
-
-    const model = map[targetType];
-    if (!model) throw new Error("Invalid targetType");
-    const field = reaction === "like" ? "likeCount" : "unlikeCount";
-    await model.updateOne({ _id: targetId }, { $inc: { [field]: number } });
+    const fieldToUpdate = reaction === 'like' ? 'likeCount' : 'unlikeCount';
+    
+    await Model.findByIdAndUpdate(targetId, { $inc: { [fieldToUpdate]: amount } });
 }
 
-//Thêm Reaction
-const handlerAddReaction = async (req, res) => {
+// Xử lý việc thêm, sửa, xóa reaction một cách thông minh
+const handlerToggleReaction = async (req, res) => {
     try {
-        const { targetType, targetId, reaction } = req.body;
-        if( !targetType || !targetId || !reaction) return res.status(400).json({ message: "Missing required fields" });
-        if (!mongoose.Types.ObjectId.isValid(targetId))  return res.status(400).json({ message: "Invalid targetId" });
+        const { targetType, targetId, reaction: newReaction } = req.body;
+        const userId = req.user.id;
 
-        const userId = req.user._id;
-        const reactionOld = await Reactions.findOne({ targetType: targetType, targetId: targetId, userId });
-        if(reactionOld) return res.status(409).json({ message: "Reaction already exists" });
-        const newReaction = await Reactions.create({
-            userId,
-            targetId: targetId,
-            targetType: targetType,
-            reaction: reaction,
-        });
-        await updateCollection(targetId, targetType, reaction, 1);
+        // --- Validation ---
+        if (!targetType || !targetId || !newReaction) {
+            return res.status(400).json({ message: 'targetType, targetId, and reaction are required.' });
+        }
+        if (!modelMap[targetType]) {
+            return res.status(400).json({ message: 'Invalid targetType.' });
+        }
+        if (!['like', 'unlike'].includes(newReaction)) {
+            return res.status(400).json({ message: "Reaction must be either 'like' or 'unlike'." });
+        }
+        if (!mongoose.Types.ObjectId.isValid(targetId)) {
+            return res.status(400).json({ message: 'Invalid targetId.' });
+        }
 
-        return res.status(201).json({ message: "Reaction created successfully",data: newReaction,});
+        const existingReaction = await Reactions.findOne({ userId, targetId, targetType });
+
+        // --- Logic xử lý ---
+
+        if (existingReaction) {
+            // Người dùng đã có reaction trên đối tượng này
+            if (existingReaction.reaction === newReaction) {
+                // --- Hủy reaction (bấm like lần 2) ---
+                await existingReaction.deleteOne();
+                await updateTargetCounts(targetType, targetId, newReaction, -1);
+                return res.status(200).json({ message: 'Reaction removed.' });
+            } else {
+                // --- Đổi reaction (từ like -> unlike hoặc ngược lại) ---
+                const oldReaction = existingReaction.reaction;
+                existingReaction.reaction = newReaction;
+                await existingReaction.save();
+
+                // Cập nhật cả 2 counts
+                await updateTargetCounts(targetType, targetId, oldReaction, -1);
+                await updateTargetCounts(targetType, targetId, newReaction, 1);
+
+                return res.status(200).json({ message: 'Reaction updated.', data: existingReaction });
+            }
+        } else {
+            // --- Thêm reaction mới ---
+            const reaction = await Reactions.create({
+                userId,
+                targetId,
+                targetType,
+                reaction: newReaction,
+            });
+            await updateTargetCounts(targetType, targetId, newReaction, 1);
+            return res.status(201).json({ message: 'Reaction added.', data: reaction });
+        }
+
     } catch (err) {
-        console.error(err);
-        return res.status(500).json({ message: "Internal server error" });
-    }
-
-};
-
-//Delete Reaction
-const handlerDeleteReaction = async (req, res) => {
-    try {
-        const reactionId = req.params.reactionId;
-        if(!reactionId) res.status(400).json({ message: "Missing required fields" });
-        if (!mongoose.Types.ObjectId.isValid(reactionId)) return res.status(400).json({ message: "Invalid reactionId" });
-
-        const reactionObject = await Reactions.findById(reactionId);
-        if(!reactionObject) return res.status(404).json({ message: "Reaction not found" });
-
-        if(!reactionObject.userId.equals(req.user._id)) return res.status(403).json({ message: "Forbidden: Not your reaction" });
-
-        await updateCollection(reactionObject.targetId, reactionObject.targetType, reactionObject.reaction, -1);
-        await reactionObject.deleteOne();
-
-        return res.status(200).json({ message: "Reaction deleted successfully" });
-    } catch (err) {
-        console.error(err);
-        return res.status(500).json({ message: "Internal server error" });
-    }
-};
-
-//Đổi Reaction
-const handlerSwapReaction = async (req, res) => {
-    try {
-        const reactionId = req.params.reactionId;
-        if (!mongoose.Types.ObjectId.isValid(reactionId)) return res.status(400).json({ message: "Invalid reactionId" });
-
-        const { reaction } = req.body
-        if(!reaction) return res.status(400).json({ message: "Missing 'reaction' field" });
-
-        const reactionObject = await Reactions.findById(reactionId);
-        if(!reactionObject) return res.status(404).json({ message: "Reaction not found" });
-
-        if(!reactionObject.userId.equals(req.user._id)) return res.status(403).json({ message: "Forbidden: Not your reaction" });
-
-        await updateCollection(reactionObject.targetId, reactionObject.targetType, reactionObject.reaction, -1);
-        await updateCollection(reactionObject.targetId, reactionObject.targetType, reaction, 1);
-
-        const reactionUpdate = await Reactions.findByIdAndUpdate(
-            reactionId,
-            {
-                reaction: reaction,
-            },
-            { new: true }
-        );
-
-        return res.status(200).json({message: "Reaction updated successfully", data: reactionUpdate,});
-    } catch (err) {
-        console.error(err);
-        return res.status(500).json({ message: "Internal server error" });
+        console.error("Error in toggleReaction:", err);
+        res.status(500).json({ message: 'Internal server error.' });
     }
 };
 
-//TODO:Lấy danh sách user đã reaction
-const handlerGetUserReaction = async (req, res) => {
+// Lấy danh sách user đã reaction vào một đối tượng
+const handlerGetUsersWhoReacted = async (req, res) => {
+    try {
+        const { targetType, targetId } = req.query;
 
+        // --- Validation ---
+        if (!targetType || !targetId) {
+            return res.status(400).json({ message: 'targetType and targetId are required query parameters.' });
+        }
+        if (!modelMap[targetType]) {
+            return res.status(400).json({ message: 'Invalid targetType.' });
+        }
+
+        const reactions = await Reactions.find({ targetType, targetId })
+            .populate('userId', 'username avatar') // Lấy username và avatar của user
+            .lean(); // Sử dụng lean() để tăng tốc độ
+
+        res.status(200).json({ data: reactions });
+
+    } catch (err) {
+        console.error("Error getting users who reacted:", err);
+        res.status(500).json({ message: 'Internal server error.' });
+    }
 };
 
-module.exports = { handlerAddReaction, handlerSwapReaction, handlerDeleteReaction, handlerGetUserReaction};
+module.exports = { handlerToggleReaction, handlerGetUsersWhoReacted };

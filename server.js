@@ -5,6 +5,9 @@ const passport = require('./config/passport');
 const connectdb = require('./config/db');
 const { connectRedis } = require('./config/redis');
 
+// Controller imports
+const { getUserProfile } = require('./controllers/userController');
+
 // Route imports
 const authRoutes = require('./routes/auth');
 const refreshRoutes = require('./routes/refresh');
@@ -31,6 +34,9 @@ async function startServer() {
   app.use('/auth', authRoutes);
   app.use('/refresh', refreshRoutes);
   app.use('/tutorials', tutorialsRouter);
+
+  // Route công khai để xem hồ sơ người dùng
+  app.get('/users/:userId/profile', getUserProfile);
   
   // Các route còn lại được gom trong indexRoutes và sẽ yêu cầu xác thực
   app.use('/', indexRoutes);
